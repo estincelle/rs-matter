@@ -24,13 +24,17 @@ use clap::{Parser, Subcommand, ValueEnum};
 use env_logger::fmt::style;
 use log::{Level, LevelFilter};
 
+use crate::commissioningtest::CommissioningTests;
+use crate::controllertest::ControllerTests;
 use crate::itest::ITests;
-use crate::mdnstest::MdnsTests;
+use crate::truststoretest::TrustStoreTests;
 
+mod commissioningtest;
 mod common;
+mod controllertest;
 mod itest;
-mod mdnstest;
 mod tlv;
+mod truststoretest;
 
 /// The main command-line interface for `xtask`.
 #[derive(Parser)]
@@ -74,6 +78,34 @@ enum Command {
     ItestTools,
     /// Print Chip integration test packages information
     ItestPackages,
+    /// Run chip-tool YAML tests using chip-tool-rs (calls `controllertest-setup` as necessary)
+    Controllertest {
+        #[command(flatten)]
+        setup_args: ControllertestSetupArgs,
+        /// Test names to run (if empty, runs Test_TC_OO_2_1)
+        tests: Vec<String>,
+        /// Timeout for each test in seconds
+        #[arg(long, default_value = "120")]
+        timeout: u32,
+        /// Skip setting up of the environment (assume it's already set up)
+        #[arg(long)]
+        skip_setup: bool,
+        /// Skip building chip-tool-rs (assume it's already built)
+        #[arg(long)]
+        skip_build: bool,
+    },
+    /// Setup environment for chip-tool YAML tests (connectedhomeip + chip-tool-rs)
+    ControllertestSetup(ControllertestSetupArgs),
+    /// Build chip-tool-rs executable
+    ControllertestBuild {
+        /// Force clean rebuild
+        #[arg(long)]
+        force_rebuild: bool,
+    },
+    /// Print controller test tooling information
+    ControllertestTools,
+    /// Print controller test packages information
+    ControllertestPackages,
     /// Decode TLV octets
     Tlv {
         /// The TLV octets are decimal
@@ -88,47 +120,46 @@ enum Command {
         /// A comma-separated list of TLV octets to decode (e.g., "0x01,0x02,0x03" or "1,2,3")
         tlv: String,
     },
-    /// Test mDNS discovery against chip-all-clusters-app (calls `mdnstest-setup` as necessary)
-    Mdnstest {
-        #[command(flatten)]
-        setup_args: MdnstestSetupArgs,
-        #[command(flatten)]
-        run_args: MdnstestRunArgs,
-        /// Skip setting up of the environment (assume it's already set up)
+    /// Run combined commissioning test (mDNS discovery + PASE + IM operations)
+    ///
+    /// This test exercises the complete flow: discovers a device via mDNS,
+    /// establishes a PASE session, and performs IM operations (read/invoke)
+    /// on the OnOff cluster.
+    Commissioningtest {
+        /// Device example binary to run
+        #[arg(long, default_value = "onoff_light")]
+        device_bin: String,
+        /// Cargo features to build examples with
         #[arg(long)]
-        skip_setup: bool,
+        features: Vec<String>,
+        /// Build profile (debug or release)
+        #[arg(long, default_value = "debug")]
+        profile: String,
+        /// Wait time (ms) for the device to start (needs time for mDNS to initialize)
+        #[arg(long, default_value_t = 5000)]
+        device_wait_ms: u64,
+        /// Passcode for PASE authentication
+        #[arg(long, default_value_t = commissioningtest::DEFAULT_PASSCODE)]
+        passcode: u32,
+        /// Discriminator for mDNS discovery
+        #[arg(long, default_value_t = commissioningtest::DEFAULT_DISCRIMINATOR)]
+        discriminator: u16,
+        /// Discovery timeout in milliseconds
+        #[arg(long, default_value_t = 30000)]
+        discovery_timeout_ms: u32,
     },
-    /// Setup environment for mDNS tests (builds chip-all-clusters-app)
-    MdnstestSetup(MdnstestSetupArgs),
-    /// Print mDNS test tooling information
-    MdnstestTools,
-    /// Print mDNS test packages information
-    MdnstestPackages,
-}
-
-/// Arguments for the `mdnstest-setup` command
-#[derive(Parser, Debug, Clone)]
-struct MdnstestSetupArgs {
-    /// connectedhomeip repository reference (branch/tag/commit)
-    #[arg(long, default_value = common::CHIP_DEFAULT_GITREF)]
-    chip_gitref: String,
-    /// Force setup even if cached
-    #[arg(long)]
-    force_setup: bool,
-}
-
-/// Arguments for the `mdnstest` run command
-#[derive(Parser, Debug, Clone)]
-struct MdnstestRunArgs {
-    /// Discriminator for the device (12-bit value)
-    #[arg(long, default_value_t = mdnstest::DEFAULT_DISCRIMINATOR)]
-    discriminator: u16,
-    /// Passcode for the device
-    #[arg(long, default_value_t = mdnstest::DEFAULT_PASSCODE)]
-    passcode: u32,
-    /// Discovery timeout in milliseconds
-    #[arg(long, default_value_t = mdnstest::DEFAULT_DISCOVERY_TIMEOUT_MS)]
-    timeout_ms: u32,
+    /// Run PAA Trust Store test (fetches real PAA certs from connectedhomeip repo)
+    Truststoretest {
+        /// Git reference (branch/tag) to fetch PAA certs from
+        #[arg(long, default_value = truststoretest::CHIP_DEFAULT_GITREF)]
+        gitref: String,
+        /// Path to a local directory containing PAA .der files (skips fetch)
+        #[arg(long)]
+        paa_path: Option<PathBuf>,
+        /// Skip fetching PAA certs (use previously cached certs)
+        #[arg(long)]
+        skip_fetch: bool,
+    },
 }
 
 impl Command {
@@ -175,29 +206,65 @@ impl Command {
                 as_asn1,
                 tlv,
             } => tlv::decode(tlv, *dec, *cert, *as_asn1),
-            Command::MdnstestTools => {
-                MdnsTests::new(workspace_dir(), print_cmd_output).print_tooling()
+            Command::ControllertestTools => {
+                ControllerTests::new(workspace_dir(), print_cmd_output).print_tooling()
             }
-            Command::MdnstestPackages => {
-                MdnsTests::new(workspace_dir(), print_cmd_output).print_packages()
+            Command::ControllertestPackages => {
+                ControllerTests::new(workspace_dir(), print_cmd_output).print_packages()
             }
-            Command::MdnstestSetup(args) => MdnsTests::new(workspace_dir(), print_cmd_output)
-                .setup(Some(&args.chip_gitref), args.force_setup),
-            Command::Mdnstest {
-                setup_args,
-                run_args,
-                skip_setup,
-            } => {
-                if !*skip_setup {
-                    Command::MdnstestSetup(setup_args.clone()).run(print_cmd_output)?;
-                }
-
-                MdnsTests::new(workspace_dir(), print_cmd_output).run(
-                    run_args.discriminator,
-                    run_args.passcode,
-                    run_args.timeout_ms,
+            Command::ControllertestSetup(args) => {
+                ControllerTests::new(workspace_dir(), print_cmd_output).setup(
+                    Some(&args.chip_gitref),
+                    Some(&args.chip_tool_rs_gitref),
+                    args.force_setup,
                 )
             }
+            Command::ControllertestBuild { force_rebuild } => {
+                ControllerTests::new(workspace_dir(), print_cmd_output).build(*force_rebuild)
+            }
+            Command::Controllertest {
+                setup_args,
+                tests,
+                timeout,
+                skip_setup,
+                skip_build,
+            } => {
+                if !*skip_setup {
+                    Command::ControllertestSetup(setup_args.clone()).run(print_cmd_output)?;
+                }
+
+                if !*skip_build {
+                    ControllerTests::new(workspace_dir(), print_cmd_output).build(false)?;
+                }
+
+                ControllerTests::new(workspace_dir(), print_cmd_output).run(tests, *timeout)
+            }
+            Command::Commissioningtest {
+                device_bin,
+                features,
+                profile,
+                device_wait_ms,
+                passcode,
+                discriminator,
+                discovery_timeout_ms,
+            } => CommissioningTests::new(workspace_dir(), print_cmd_output).run(
+                device_bin,
+                features,
+                profile,
+                *device_wait_ms,
+                *passcode,
+                *discriminator,
+                *discovery_timeout_ms,
+            ),
+            Command::Truststoretest {
+                gitref,
+                paa_path,
+                skip_fetch,
+            } => TrustStoreTests::new(workspace_dir(), print_cmd_output).run(
+                gitref,
+                paa_path.as_deref(),
+                *skip_fetch,
+            ),
         }
     }
 }
@@ -261,6 +328,20 @@ struct BuildArgs {
     /// Force clean rebuild
     #[arg(long)]
     force_rebuild: bool,
+}
+
+/// Arguments for the `controllertest-setup` command
+#[derive(Parser, Debug, Clone)]
+struct ControllertestSetupArgs {
+    /// connectedhomeip repository reference (branch/tag/commit)
+    #[arg(long, default_value = controllertest::CHIP_DEFAULT_GITREF)]
+    chip_gitref: String,
+    /// chip-tool-rs repository reference (branch/tag/commit)
+    #[arg(long, default_value = controllertest::CHIP_TOOL_RS_DEFAULT_GITREF)]
+    chip_tool_rs_gitref: String,
+    /// Force setup even if cached
+    #[arg(long)]
+    force_setup: bool,
 }
 
 fn main() -> anyhow::Result<()> {
