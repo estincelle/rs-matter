@@ -15,7 +15,7 @@
  *    limitations under the License.
  */
 
-//! A module for running Chip YAML tests using chip-tool-rs as the server.
+//! A module for running chip-tool YAML tests using chip-tool-rs as the server.
 
 use std::env;
 use std::fs::{self, File};
@@ -32,12 +32,12 @@ const DEFAULT_TESTS: &[&str] = &["Test_TC_OO_2_1"];
 /// The default Git reference to use for the Chip repository
 pub const CHIP_DEFAULT_GITREF: &str = "v1.4.2-branch";
 /// The directory where the Chip repository will be cloned
-const CHIP_DIR: &str = ".build/yamltest/connectedhomeip";
+const CHIP_DIR: &str = ".build/controllertest/connectedhomeip";
 
 /// The default Git reference to use for the chip-tool-rs repository
 pub const CHIP_TOOL_RS_DEFAULT_GITREF: &str = "main";
 /// The directory where the chip-tool-rs repository will be cloned
-const CHIP_TOOL_RS_DIR: &str = ".build/yamltest/chip-tool-rs";
+const CHIP_TOOL_RS_DIR: &str = ".build/controllertest/chip-tool-rs";
 
 /// The tooling that is checked for presence in the command line
 const REQUIRED_TOOLING: &[&str] = &["bash", "git", "cargo", "python3", "pip3"];
@@ -51,31 +51,31 @@ const REQUIRED_PACKAGES: &[&str] = &[
     "python3-dev",
 ];
 
-/// A utility for running Chip YAML tests using chip-tool-rs.
-pub struct YamlTests {
+/// A utility for running chip-tool YAML tests using chip-tool-rs.
+pub struct ControllerTests {
     /// The `rs-matter` workspace directory
     workspace_dir: PathBuf,
     print_cmd_output: bool,
 }
 
-impl YamlTests {
-    /// Create a new `YamlTests` instance.
+impl ControllerTests {
+    /// Create a new `ControllerTests` instance.
     ///
     /// # Arguments
     /// - `workspace_dir`: The path to the `rs-matter` workspace directory.
     /// - `print_cmd_output`: Whether to print command output to the console.
     pub fn new(workspace_dir: PathBuf, print_cmd_output: bool) -> Self {
-        YamlTests {
+        ControllerTests {
             workspace_dir,
             print_cmd_output,
         }
     }
 
-    /// Print the required system tools for YAML tests.
+    /// Print the required system tools for chip-tool YAML tests.
     pub fn print_tooling(&self) -> anyhow::Result<()> {
         let tooling = REQUIRED_TOOLING.to_vec().join(" ");
 
-        warn!("Printing required system tools for Chip YAML tests");
+        warn!("Printing required system tools for chip-tool YAML tests");
         info!("{tooling}");
 
         println!("{tooling}");
@@ -83,11 +83,11 @@ impl YamlTests {
         Ok(())
     }
 
-    /// Print the required Debian/Ubuntu system packages for YAML tests.
+    /// Print the required Debian/Ubuntu system packages for chip-tool YAML tests.
     pub fn print_packages(&self) -> anyhow::Result<()> {
         let packages = REQUIRED_PACKAGES.to_vec().join(" ");
 
-        warn!("Printing required Debian/Ubuntu system packages for Chip YAML tests");
+        warn!("Printing required Debian/Ubuntu system packages for chip-tool YAML tests");
         info!("{packages}");
 
         println!("{packages}");
@@ -95,7 +95,7 @@ impl YamlTests {
         Ok(())
     }
 
-    /// Setup the environment so that YAML tests can be run.
+    /// Setup the environment so that chip-tool YAML tests can be run.
     ///
     /// In details:
     /// - Check system dependencies
@@ -109,7 +109,7 @@ impl YamlTests {
         chip_tool_rs_gitref: Option<&str>,
         force_rebuild: bool,
     ) -> anyhow::Result<()> {
-        warn!("Setting up YAML test environment...");
+        warn!("Setting up chip-tool YAML test environment...");
 
         // Check system dependencies
         self.check_tooling()?;
@@ -120,7 +120,7 @@ impl YamlTests {
         // Setup chip-tool-rs
         self.setup_chip_tool_rs(chip_tool_rs_gitref, force_rebuild)?;
 
-        info!("YAML test environment setup completed successfully.");
+        info!("chip-tool YAML test environment setup completed successfully.");
 
         Ok(())
     }
@@ -130,7 +130,7 @@ impl YamlTests {
         self.build_chip_tool_rs(force_rebuild)
     }
 
-    /// Run YAML tests
+    /// Run chip-tool YAML tests
     pub fn run<'a>(
         &self,
         tests: impl IntoIterator<Item = &'a String> + Clone,
@@ -323,20 +323,22 @@ impl YamlTests {
         tests: impl IntoIterator<Item = &'a String> + Clone,
         test_timeout_secs: u32,
     ) -> anyhow::Result<()> {
-        warn!("Running YAML tests...");
+        warn!("Running chip-tool YAML tests...");
 
         let chip_dir = self.chip_dir();
         let chip_tool_rs_dir = self.chip_tool_rs_dir();
 
         // Verify environment is set up
         if !chip_dir.exists() {
-            anyhow::bail!("connectedhomeip not found. Run `cargo xtask yamltest-setup` first.");
+            anyhow::bail!(
+                "connectedhomeip not found. Run `cargo xtask controllertest-setup` first."
+            );
         }
 
         let chip_tool_rs_exe = chip_tool_rs_dir.join("target/release/chip-tool-rs");
         if !chip_tool_rs_exe.exists() {
             anyhow::bail!(
-                "chip-tool-rs executable not found. Run `cargo xtask yamltest-setup` first."
+                "chip-tool-rs executable not found. Run `cargo xtask controllertest-setup` first."
             );
         }
 
@@ -361,13 +363,13 @@ impl YamlTests {
             self.run_test(test_name, test_timeout_secs)?;
         }
 
-        info!("All YAML tests completed successfully.");
+        info!("All chip-tool YAML tests completed successfully.");
 
         Ok(())
     }
 
     fn run_test(&self, test_name: &str, timeout_secs: u32) -> anyhow::Result<()> {
-        info!("=> Running YAML test `{test_name}` with timeout {timeout_secs}s...");
+        info!("=> Running chip-tool YAML test `{test_name}` with timeout {timeout_secs}s...");
 
         let chip_dir = self.chip_dir();
         let chip_tool_rs_dir = self.chip_tool_rs_dir();
@@ -393,7 +395,7 @@ impl YamlTests {
             .arg(&test_command);
 
         match self.run_command(&mut cmd) {
-            Ok(()) => info!("YAML test `{test_name}` completed successfully"),
+            Ok(()) => info!("chip-tool YAML test `{test_name}` completed successfully"),
             Err(err) => {
                 info!("Command failed: {}", test_command);
                 return Err(err);
