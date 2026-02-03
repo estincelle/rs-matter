@@ -24,8 +24,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use env_logger::fmt::style;
 use log::{Level, LevelFilter};
 
+use crate::controllertest::ControllerTests;
 use crate::itest::ITests;
 
+mod controllertest;
 mod itest;
 mod tlv;
 
@@ -71,6 +73,34 @@ enum Command {
     ItestTools,
     /// Print Chip integration test packages information
     ItestPackages,
+    /// Run chip-tool YAML tests using chip-tool-rs (calls `controllertest-setup` as necessary)
+    Controllertest {
+        #[command(flatten)]
+        setup_args: ControllertestSetupArgs,
+        /// Test names to run (if empty, runs Test_TC_OO_2_1)
+        tests: Vec<String>,
+        /// Timeout for each test in seconds
+        #[arg(long, default_value = "120")]
+        timeout: u32,
+        /// Skip setting up of the environment (assume it's already set up)
+        #[arg(long)]
+        skip_setup: bool,
+        /// Skip building chip-tool-rs (assume it's already built)
+        #[arg(long)]
+        skip_build: bool,
+    },
+    /// Setup environment for chip-tool YAML tests (connectedhomeip + chip-tool-rs)
+    ControllertestSetup(ControllertestSetupArgs),
+    /// Build chip-tool-rs executable
+    ControllertestBuild {
+        /// Force clean rebuild
+        #[arg(long)]
+        force_rebuild: bool,
+    },
+    /// Print controller test tooling information
+    ControllertestTools,
+    /// Print controller test packages information
+    ControllertestPackages,
     /// Decode TLV octets
     Tlv {
         /// The TLV octets are decimal
@@ -131,6 +161,39 @@ impl Command {
                 as_asn1,
                 tlv,
             } => tlv::decode(tlv, *dec, *cert, *as_asn1),
+            Command::ControllertestTools => {
+                ControllerTests::new(workspace_dir(), print_cmd_output).print_tooling()
+            }
+            Command::ControllertestPackages => {
+                ControllerTests::new(workspace_dir(), print_cmd_output).print_packages()
+            }
+            Command::ControllertestSetup(args) => {
+                ControllerTests::new(workspace_dir(), print_cmd_output).setup(
+                    Some(&args.chip_gitref),
+                    Some(&args.chip_tool_rs_gitref),
+                    args.force_setup,
+                )
+            }
+            Command::ControllertestBuild { force_rebuild } => {
+                ControllerTests::new(workspace_dir(), print_cmd_output).build(*force_rebuild)
+            }
+            Command::Controllertest {
+                setup_args,
+                tests,
+                timeout,
+                skip_setup,
+                skip_build,
+            } => {
+                if !*skip_setup {
+                    Command::ControllertestSetup(setup_args.clone()).run(print_cmd_output)?;
+                }
+
+                if !*skip_build {
+                    ControllerTests::new(workspace_dir(), print_cmd_output).build(false)?;
+                }
+
+                ControllerTests::new(workspace_dir(), print_cmd_output).run(tests, *timeout)
+            }
         }
     }
 }
@@ -194,6 +257,20 @@ struct BuildArgs {
     /// Force clean rebuild
     #[arg(long)]
     force_rebuild: bool,
+}
+
+/// Arguments for the `controllertest-setup` command
+#[derive(Parser, Debug, Clone)]
+struct ControllertestSetupArgs {
+    /// connectedhomeip repository reference (branch/tag/commit)
+    #[arg(long, default_value = controllertest::CHIP_DEFAULT_GITREF)]
+    chip_gitref: String,
+    /// chip-tool-rs repository reference (branch/tag/commit)
+    #[arg(long, default_value = controllertest::CHIP_TOOL_RS_DEFAULT_GITREF)]
+    chip_tool_rs_gitref: String,
+    /// Force setup even if cached
+    #[arg(long)]
+    force_setup: bool,
 }
 
 fn main() -> anyhow::Result<()> {
