@@ -1,0 +1,51 @@
+---
+name: PAA Trust Store Test
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+  schedule:
+    # Run every night at 6:00 AM UTC (offset from other tests)
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+env:
+  RUST_TOOLCHAIN: stable
+  CARGO_TERM_COLOR: always
+
+jobs:
+  truststore_test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Checkout rs-matter
+        uses: actions/checkout@v4
+
+      - name: Install libdbus
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+
+      - name: Build xtask
+        run: |
+          cargo build --manifest-path xtask/Cargo.toml
+
+      - name: Run PAA trust store test
+        run: |
+          cargo xtask truststoretest
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: truststore-test-logs-${{ github.run_id }}
+          path: |
+            .build/truststoretest
+          if-no-files-found: ignore
+          retention-days: 7
