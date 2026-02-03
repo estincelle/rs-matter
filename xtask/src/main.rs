@@ -25,9 +25,11 @@ use env_logger::fmt::style;
 use log::{Level, LevelFilter};
 
 use crate::itest::ITests;
+use crate::yamltest::YamlTests;
 
 mod itest;
 mod tlv;
+mod yamltest;
 
 /// The main command-line interface for `xtask`.
 #[derive(Parser)]
@@ -71,6 +73,34 @@ enum Command {
     ItestTools,
     /// Print Chip integration test packages information
     ItestPackages,
+    /// Run Chip YAML tests using chip-tool-rs (calls `yamltest-setup` as necessary)
+    Yamltest {
+        #[command(flatten)]
+        setup_args: YamltestSetupArgs,
+        /// Test names to run (if empty, runs Test_TC_OO_2_1)
+        tests: Vec<String>,
+        /// Timeout for each test in seconds
+        #[arg(long, default_value = "120")]
+        timeout: u32,
+        /// Skip setting up of the environment (assume it's already set up)
+        #[arg(long)]
+        skip_setup: bool,
+        /// Skip building chip-tool-rs (assume it's already built)
+        #[arg(long)]
+        skip_build: bool,
+    },
+    /// Setup environment for YAML tests (connectedhomeip + chip-tool-rs)
+    YamltestSetup(YamltestSetupArgs),
+    /// Build chip-tool-rs executable
+    YamltestBuild {
+        /// Force clean rebuild
+        #[arg(long)]
+        force_rebuild: bool,
+    },
+    /// Print YAML test tooling information
+    YamltestTools,
+    /// Print YAML test packages information
+    YamltestPackages,
     /// Decode TLV octets
     Tlv {
         /// The TLV octets are decimal
@@ -131,6 +161,38 @@ impl Command {
                 as_asn1,
                 tlv,
             } => tlv::decode(tlv, *dec, *cert, *as_asn1),
+            Command::YamltestTools => {
+                YamlTests::new(workspace_dir(), print_cmd_output).print_tooling()
+            }
+            Command::YamltestPackages => {
+                YamlTests::new(workspace_dir(), print_cmd_output).print_packages()
+            }
+            Command::YamltestSetup(args) => YamlTests::new(workspace_dir(), print_cmd_output)
+                .setup(
+                    Some(&args.chip_gitref),
+                    Some(&args.chip_tool_rs_gitref),
+                    args.force_setup,
+                ),
+            Command::YamltestBuild { force_rebuild } => {
+                YamlTests::new(workspace_dir(), print_cmd_output).build(*force_rebuild)
+            }
+            Command::Yamltest {
+                setup_args,
+                tests,
+                timeout,
+                skip_setup,
+                skip_build,
+            } => {
+                if !*skip_setup {
+                    Command::YamltestSetup(setup_args.clone()).run(print_cmd_output)?;
+                }
+
+                if !*skip_build {
+                    YamlTests::new(workspace_dir(), print_cmd_output).build(false)?;
+                }
+
+                YamlTests::new(workspace_dir(), print_cmd_output).run(tests, *timeout)
+            }
         }
     }
 }
@@ -194,6 +256,20 @@ struct BuildArgs {
     /// Force clean rebuild
     #[arg(long)]
     force_rebuild: bool,
+}
+
+/// Arguments for the `yamltest-setup` command
+#[derive(Parser, Debug, Clone)]
+struct YamltestSetupArgs {
+    /// connectedhomeip repository reference (branch/tag/commit)
+    #[arg(long, default_value = yamltest::CHIP_DEFAULT_GITREF)]
+    chip_gitref: String,
+    /// chip-tool-rs repository reference (branch/tag/commit)
+    #[arg(long, default_value = yamltest::CHIP_TOOL_RS_DEFAULT_GITREF)]
+    chip_tool_rs_gitref: String,
+    /// Force setup even if cached
+    #[arg(long)]
+    force_setup: bool,
 }
 
 fn main() -> anyhow::Result<()> {
