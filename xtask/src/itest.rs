@@ -246,7 +246,7 @@ impl ITests {
 
         let mut cmd = Command::new("git");
 
-        cmd.current_dir(&chip_dir).arg("checkout").arg(chip_gitref);
+        cmd.current_dir(&chip_dir).arg("switch").arg(chip_gitref);
 
         if !self.print_cmd_output {
             cmd.arg("--quiet");
