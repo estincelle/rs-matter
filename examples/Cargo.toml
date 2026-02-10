@@ -26,6 +26,9 @@ name = "chip_tool_tests"
 [[bin]]
 name = "dimmable_light"
 
+[[bin]]
+name = "mdns_discover"
+
 [features]
 default = ["log"]
 log = []
@@ -34,8 +37,8 @@ openssl = ["rs-matter/openssl"]
 zbus = ["rs-matter/zbus"]
 astro-dnssd = ["rs-matter/astro-dnssd"]
 zeroconf = ["rs-matter/zeroconf"]
-avahi = ["rs-matter/zbus"]
-resolve = ["rs-matter/zbus"]
+avahi = ["rs-matter/zbus", "dep:zbus"]
+resolve = ["rs-matter/zbus", "dep:zbus"]
 chip-test = []
 # Temporary fix for unexpected cfgs lint
 defmt = []
@@ -54,4 +57,5 @@ futures-lite = "2"
 rs-matter = { path = "../rs-matter", features = ["async-io"] }
 rand = { version = "0.8", features = ["std", "std_rng"] }
 async-signal = "0.2"
-socket2 = "0.5"
+socket2 = { version = "0.5", features = ["all"] }
+zbus = { version = "5.8", optional = true }

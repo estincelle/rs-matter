@@ -142,8 +142,10 @@ async fn run_builtin_mdns<C: Crypto>(
     // NOTE:
     // When using a custom UDP stack (e.g. for `no_std` environments), replace with a UDP socket bind + multicast join for your custom UDP stack
     // The returned socket should be splittable into two halves, where each half implements `UdpSend` and `UdpReceive` respectively
-    let mut socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+    let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
+    #[cfg(not(windows))]
+    socket.set_reuse_port(true)?;
     socket.set_only_v6(false)?;
     socket.bind(&MDNS_SOCKET_DEFAULT_BIND_ADDR.into())?;
     let socket = async_io::Async::<UdpSocket>::new_nonblocking(socket.into())?;
