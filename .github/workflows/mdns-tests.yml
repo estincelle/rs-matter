@@ -3,9 +3,9 @@ name: mDNS Integration Tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
-    branches: [main]
+    branches: [main, development]
   schedule:
     # Run every night at 3:00 AM UTC (offset from chiptool-tests at 2:00 AM)
     - cron: "0 3 * * *"
