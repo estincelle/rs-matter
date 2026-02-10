@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-rs-matter = { path = "../rs-matter", default-features = false, features = ["rustcrypto", "std", "async-io"] }
+rs-matter = { path = "../rs-matter", default-features = false, features = ["rustcrypto", "os", "async-io"] }
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.11"
@@ -20,3 +20,5 @@ embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
 futures-lite = "2"
 rand = { version = "0.8", features = ["std", "std_rng"] }
 static_cell = "1"
+socket2 = "0.5"
+nix = { version = "0.30", features = ["net"] }
