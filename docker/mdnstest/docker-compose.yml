@@ -1,0 +1,30 @@
+# Docker Compose for mDNS testing
+#
+# Usage:
+#   cd docker/mdnstest
+#   docker-compose up --build
+#
+# Note: On macOS, Docker Desktop doesn't support true host networking.
+# This configuration uses macvlan to get a separate IP on your local network,
+# which allows proper multicast/mDNS communication.
+#
+# For simpler testing, you can use a Linux VM with host networking.
+
+services:
+  mdns-discover:
+    build:
+      context: ../..
+      dockerfile: docker/mdnstest/Dockerfile
+    # On Linux, use host networking for mDNS multicast
+    network_mode: host
+    # If host networking doesn't work (macOS), you'll need to:
+    # 1. Use a Linux VM, or
+    # 2. Run chip-all-clusters-app inside the same container
+
+  # Alternative: Run both the test app and discovery in the same container
+  mdns-test-standalone:
+    build:
+      context: ../..
+      dockerfile: docker/mdnstest/Dockerfile.standalone
+    profiles:
+      - standalone
