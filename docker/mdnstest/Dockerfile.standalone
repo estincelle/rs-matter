@@ -1,0 +1,124 @@
+# Standalone Dockerfile for testing mDNS implementations
+#
+# This container includes both chip-all-clusters-app and the mdns_discover
+# example, allowing self-contained testing without host networking.
+#
+# Usage:
+#   docker build -t rs-matter-mdnstest-standalone -f docker/mdnstest/Dockerfile.standalone .
+#   docker run --rm rs-matter-mdnstest-standalone
+#
+# To test specific backend:
+#   docker run --rm -e MDNS_BACKEND=builtin rs-matter-mdnstest-standalone
+#   docker run --rm -e MDNS_BACKEND=avahi rs-matter-mdnstest-standalone
+#
+# Note: Building chip-all-clusters-app takes significant time and disk space (~20GB during build).
+
+FROM rust:1.93-slim-trixie AS rust-builder
+
+# Install minimal build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    libdbus-1-dev \
+    libavahi-client-dev \
+    libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy only what's needed for the build
+COPY Cargo.toml Cargo.lock ./
+COPY rs-matter ./rs-matter
+COPY rs-matter-macros ./rs-matter-macros
+COPY examples ./examples
+
+# Build the mdns_discover example - builtin, avahi, and zeroconf versions
+RUN cargo build --package rs-matter-examples --bin mdns_discover --release \
+    && mv target/release/mdns_discover target/release/mdns_discover_builtin \
+    && cargo build --package rs-matter-examples --bin mdns_discover --release --features avahi \
+    && mv target/release/mdns_discover target/release/mdns_discover_avahi \
+    && cargo build --package rs-matter-examples --bin mdns_discover --release --features zeroconf \
+    && mv target/release/mdns_discover target/release/mdns_discover_zeroconf \
+    && strip target/release/mdns_discover_builtin target/release/mdns_discover_avahi target/release/mdns_discover_zeroconf
+
+
+FROM debian:bookworm AS chip-builder
+
+# Install build dependencies - full set required for Matter build
+RUN apt-get update && apt-get install -y \
+    git \
+    ca-certificates \
+    gcc \
+    g++ \
+    pkg-config \
+    ninja-build \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
+    libssl-dev \
+    libglib2.0-dev \
+    libdbus-1-dev \
+    libgirepository1.0-dev \
+    libcairo2-dev \
+    libreadline-dev \
+    libavahi-client-dev \
+    wget \
+    unzip \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install gn (generate ninja) - detect architecture
+RUN ARCH=$(dpkg --print-architecture) \
+    && if [ "$ARCH" = "arm64" ]; then GN_ARCH="linux-arm64"; else GN_ARCH="linux-amd64"; fi \
+    && wget -q "https://chrome-infra-packages.appspot.com/dl/gn/gn/${GN_ARCH}/+/latest" -O /tmp/gn.zip \
+    && unzip /tmp/gn.zip -d /usr/local/bin \
+    && rm /tmp/gn.zip
+
+WORKDIR /build
+
+# Clone with minimal history
+RUN git clone --depth 1 --branch v1.4.2-branch --single-branch \
+    https://github.com/project-chip/connectedhomeip.git .
+
+# Initialize submodules with shallow clone for linux platform
+RUN python3 scripts/checkout_submodules.py --shallow --platform linux
+
+# Build chip-all-clusters-app using the project's build script
+# This handles all the pigweed environment setup automatically
+RUN ./scripts/examples/gn_build_example.sh examples/all-clusters-app/linux out/host \
+    && strip out/host/chip-all-clusters-app
+
+# Clean up to reduce image size for any layer caching
+RUN rm -rf /build/.git /build/out/host/obj /build/out/host/gen
+
+
+FROM debian:trixie-slim
+
+# Install runtime dependencies including Avahi for mDNS
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libssl3t64 \
+    libglib2.0-0t64 \
+    libdbus-1-3 \
+    libstdc++6 \
+    libavahi-client3 \
+    avahi-daemon \
+    avahi-utils \
+    dbus \
+    iproute2 \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy only the binaries we need
+COPY --from=rust-builder /app/target/release/mdns_discover_builtin /app/
+COPY --from=rust-builder /app/target/release/mdns_discover_avahi /app/
+COPY --from=rust-builder /app/target/release/mdns_discover_zeroconf /app/
+COPY --from=chip-builder /build/out/host/chip-all-clusters-app /app/
+
+# Copy the test script
+COPY docker/mdnstest/run-test.sh /app/
+RUN chmod +x /app/run-test.sh
+
+CMD ["/app/run-test.sh"]
