@@ -3,9 +3,9 @@ name: Exchange Integration Test
 
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
-    branches: [main]
+    branches: [main, development]
   schedule:
     # Run every night at 4:00 AM UTC (offset from chiptool-tests and mdns-tests)
     - cron: "0 4 * * *"
