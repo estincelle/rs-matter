@@ -319,29 +319,27 @@ where
     debug!("Built mDNS query: {} bytes for {}", query_len, service_type);
 
     // Send query to mDNS multicast addresses
-    if ipv4_interface.is_some() {
-        let addr = SocketAddr::V4(SocketAddrV4::new(MDNS_IPV4_BROADCAST_ADDR, MDNS_PORT));
+    for addr in Iterator::chain(
+        ipv4_interface
+            .map(|_| SocketAddr::V4(SocketAddrV4::new(MDNS_IPV4_BROADCAST_ADDR, MDNS_PORT)))
+            .into_iter(),
+        ipv6_interface
+            .map(|interface| {
+                SocketAddr::V6(SocketAddrV6::new(
+                    MDNS_IPV6_BROADCAST_ADDR,
+                    MDNS_PORT,
+                    0,
+                    interface,
+                ))
+            })
+            .into_iter(),
+    ) {
         info!("Sending mDNS query for {} to {}", service_type, addr);
         if let Err(e) = send
             .send_to(&query_buf[..query_len], Address::Udp(addr))
             .await
         {
-            warn!("Failed to send mDNS query to IPv4: {:?}", e);
-        }
-    }
-
-    if let Some(interface) = ipv6_interface {
-        let addr = SocketAddr::V6(SocketAddrV6::new(
-            MDNS_IPV6_BROADCAST_ADDR,
-            MDNS_PORT,
-            0,
-            interface,
-        ));
-        if let Err(e) = send
-            .send_to(&query_buf[..query_len], Address::Udp(addr))
-            .await
-        {
-            debug!("Failed to send mDNS query to IPv6: {:?}", e);
+            warn!("Failed to send mDNS query to {}: {:?}", addr, e);
         }
     }
 
