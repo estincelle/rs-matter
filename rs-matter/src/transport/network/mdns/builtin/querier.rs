@@ -125,7 +125,7 @@ fn process_srv(
         if names_match(owner, state.device.instance_name.as_str()) {
             state.device.port = port;
             state.has_port = true;
-            let _ = state.hostname.clear();
+            state.hostname.clear();
             let _ = write!(&mut state.hostname, "{}", target.trim_end_matches('.'));
         }
     }
