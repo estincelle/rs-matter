@@ -97,41 +97,13 @@ fn names_match(name1: &str, name2: &str) -> bool {
         .eq_ignore_ascii_case(name2.trim_end_matches('.'))
 }
 
-/// Collect TXT record data into a buffer, returning the buffer and length
-fn collect_txt_data(txt: &Txt<&[u8]>) -> ([u8; 256], usize) {
-    let mut buf = [0u8; 256];
-    let mut len = 0;
-
+/// Parse TXT record key-value pairs directly from the Txt record
+fn parse_txt_record(txt: &Txt<&[u8]>, device: &mut DiscoveredDevice) {
     for item in txt.iter() {
-        if len + item.len() + 1 <= buf.len() {
-            buf[len] = item.len() as u8;
-            buf[len + 1..len + 1 + item.len()].copy_from_slice(item);
-            len += item.len() + 1;
-        }
-    }
-
-    (buf, len)
-}
-
-/// Parse TXT record key-value pairs
-fn parse_txt_record(txt_data: &[u8], device: &mut DiscoveredDevice) {
-    // TXT records are a sequence of length-prefixed strings
-    let mut offset = 0;
-    while offset < txt_data.len() {
-        let len = txt_data[offset] as usize;
-        offset += 1;
-
-        if len == 0 || offset + len > txt_data.len() {
-            break;
-        }
-
-        let kv = &txt_data[offset..offset + len];
-        offset += len;
-
-        // Parse key=value
-        if let Some(eq_pos) = kv.iter().position(|&b| b == b'=') {
-            let key = &kv[..eq_pos];
-            let value = &kv[eq_pos + 1..];
+        // Each item is a raw string like b"D=3840"
+        if let Some(eq_pos) = item.iter().position(|&b| b == b'=') {
+            let key = &item[..eq_pos];
+            let value = &item[eq_pos + 1..];
 
             if let (Ok(key_str), Ok(value_str)) =
                 (core::str::from_utf8(key), core::str::from_utf8(value))
@@ -167,8 +139,7 @@ fn process_txt(
 ) {
     for state in states.iter_mut() {
         if names_match(owner, state.device.instance_name.as_str()) {
-            let (txt_buf, txt_len) = collect_txt_data(txt);
-            parse_txt_record(&txt_buf[..txt_len], &mut state.device);
+            parse_txt_record(txt, &mut state.device);
             state.has_txt = true;
         }
     }
@@ -521,30 +492,23 @@ mod tests {
     }
 
     #[test]
-    fn collect_txt_data_single_item() {
-        // Create a mock Txt record with a single item
-        // For this test, we'll test parse_txt_record which uses collect_txt_data indirectly
+    fn parse_txt_record_single_item() {
+        // Create a Txt record with a single item
         let txt_data = [6, b'D', b'=', b'1', b'2', b'3', b'4'];
+        let txt = Txt::from_octets(&txt_data[..]).unwrap();
         let mut device = DiscoveredDevice::default();
-        parse_txt_record(&txt_data, &mut device);
+        parse_txt_record(&txt, &mut device);
         assert_eq!(device.discriminator, 1234);
     }
 
     #[test]
-    fn collect_txt_data_empty() {
-        let txt_data: [u8; 0] = [];
+    fn parse_txt_record_empty() {
+        // Empty TXT record (just a zero-length string per RFC)
+        let txt_data = [0u8];
+        let txt = Txt::from_octets(&txt_data[..]).unwrap();
         let mut device = DiscoveredDevice::default();
-        parse_txt_record(&txt_data, &mut device);
+        parse_txt_record(&txt, &mut device);
         // Device should remain at defaults
-        assert_eq!(device.discriminator, 0);
-    }
-
-    #[test]
-    fn collect_txt_data_zero_length_item() {
-        // A zero-length item should stop parsing
-        let txt_data = [0];
-        let mut device = DiscoveredDevice::default();
-        parse_txt_record(&txt_data, &mut device);
         assert_eq!(device.discriminator, 0);
     }
 
@@ -574,8 +538,9 @@ mod tests {
             14, b'D', b'N', b'=', b'T', b'e', b's', b't', b' ', b'D', b'e', b'v', b'i', b'c',
             b'e', // DN=Test Device
         ];
+        let txt = Txt::from_octets(&txt_data[..]).unwrap();
 
-        parse_txt_record(&txt_data, &mut device);
+        parse_txt_record(&txt, &mut device);
 
         assert_eq!(device.discriminator, 3840);
         assert_eq!(device.vendor_id, 65521);
@@ -600,8 +565,9 @@ mod tests {
             5, b'P', b'H', b'=', b'3', b'3',                 // PH=33
             8, b'P', b'I', b'=', b'P', b'r', b'e', b's', b's', // PI=Press
         ];
+        let txt = Txt::from_octets(&txt_data[..]).unwrap();
 
-        parse_txt_record(&txt_data, &mut device);
+        parse_txt_record(&txt, &mut device);
 
         assert_eq!(device.discriminator, 1234);
         assert_eq!(device.vendor_id, 100);
@@ -624,23 +590,11 @@ mod tests {
 
         // Item without equals sign should be skipped
         let txt_data = [4, b'T', b'E', b'S', b'T'];
+        let txt = Txt::from_octets(&txt_data[..]).unwrap();
 
-        parse_txt_record(&txt_data, &mut device);
+        parse_txt_record(&txt, &mut device);
 
         // Device should remain at defaults
-        assert_eq!(device.discriminator, 0);
-    }
-
-    #[test]
-    fn parse_txt_record_truncated() {
-        let mut device = DiscoveredDevice::default();
-
-        // Length byte says 10, but only 4 bytes follow
-        let txt_data = [10, b'D', b'=', b'1', b'2'];
-
-        parse_txt_record(&txt_data, &mut device);
-
-        // Should handle gracefully without crashing
         assert_eq!(device.discriminator, 0);
     }
 
