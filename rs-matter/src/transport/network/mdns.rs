@@ -386,7 +386,7 @@ impl DiscoveredDevice {
     /// If the address list is full, lower-priority addresses may be evicted.
     pub fn add_address(&mut self, addr: IpAddr) {
         // Check for duplicates
-        if self.addresses.iter().any(|a| *a == addr) {
+        if self.addresses.contains(&addr) {
             return;
         }
 
