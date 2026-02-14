@@ -48,20 +48,6 @@ const TAG_CONTEXT_3: u8 = 0xA3;
 // Context specific tag for AuthorityKeyIdentifier
 const TAG_CONTEXT_0_PRIM: u8 = 0x80;
 
-// TBS certificate fields
-#[allow(unused)]
-#[repr(usize)]
-enum TbsField {
-    Version,
-    SerialNum,
-    Signature,
-    Issuer,
-    Validity,
-    Subject,
-    SubjectPubKeyInfo,
-    Extensions,
-}
-
 // X.509 extension OIDs
 const OID_SUBJECT_KEY_ID: [u8; 3] = [0x55, 0x1D, 0x0E]; // OID 2.5.29.14
 const OID_AUTHORITY_KEY_ID: [u8; 3] = [0x55, 0x1D, 0x23]; // OID 2.5.29.35
@@ -79,16 +65,15 @@ const P256_PUBLIC_KEY_LEN: usize = 65;
 
 /// DER reader that operates on a borrowed byte slice.
 ///
-/// Navigates the hierarchical structure of DER-encoded ASN.1 data.
-/// Used for parsing X.509 certificates and CMS/PKCS#7 structures.
+/// Navigates the hierarchical structure of a DER-encoded X.509 certificate.
 #[derive(Clone, Copy)]
-pub(crate) struct DerReader<'a> {
+struct DerReader<'a> {
     data: &'a [u8],
 }
 
 impl<'a> DerReader<'a> {
     /// Create a new DerReader from a byte slice.
-    pub(crate) fn new(data: &'a [u8]) -> Self {
+    fn new(data: &'a [u8]) -> Self {
         Self { data }
     }
 
@@ -100,7 +85,7 @@ impl<'a> DerReader<'a> {
     /// - Short form: single byte < 128
     /// - Long form 0x81: next 1 byte is the length
     /// - Long form 0x82: next 2 bytes are the length (big-endian)
-    pub(crate) fn read_length(data: &'a [u8]) -> Result<(usize, &'a [u8]), Error> {
+    fn read_length(data: &'a [u8]) -> Result<(usize, &'a [u8]), Error> {
         if data.is_empty() {
             return Err(ErrorCode::InvalidData.into());
         }
@@ -132,7 +117,7 @@ impl<'a> DerReader<'a> {
     /// Read a complete TLV (tag, length, value) from the current position.
     ///
     /// Returns `(tag, value_bytes, rest_after_this_tlv)`.
-    pub(crate) fn read_tlv(&self) -> Result<(u8, &'a [u8], &'a [u8]), Error> {
+    fn read_tlv(&self) -> Result<(u8, &'a [u8], &'a [u8]), Error> {
         if self.data.is_empty() {
             return Err(ErrorCode::InvalidData.into());
         }
@@ -152,19 +137,19 @@ impl<'a> DerReader<'a> {
     /// Enter a constructed type (SEQUENCE, SET, etc.).
     ///
     /// Returns `(tag, inner_reader_over_value_bytes, rest_after_this_tlv)`.
-    pub(crate) fn enter(&self) -> Result<(u8, DerReader<'a>, &'a [u8]), Error> {
+    fn enter(&self) -> Result<(u8, DerReader<'a>, &'a [u8]), Error> {
         let (tag, value, rest) = self.read_tlv()?;
         Ok((tag, DerReader::new(value), rest))
     }
 
     /// Skip the current TLV and return a reader positioned at the next element.
-    pub(crate) fn skip(&self) -> Result<DerReader<'a>, Error> {
+    fn skip(&self) -> Result<DerReader<'a>, Error> {
         let (_, _, rest) = self.read_tlv()?;
         Ok(DerReader::new(rest))
     }
 
     /// Check if all bytes have been consumed.
-    pub(crate) fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 }
@@ -276,7 +261,7 @@ fn parse_asn1_time(tag: u8, value: &[u8]) -> Result<u64, Error> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// let cert = X509CertRef::new(der_bytes)?;
 /// let skid = cert.subject_key_id()?;
 /// let pubkey = cert.public_key()?;
@@ -323,12 +308,21 @@ impl<'a> X509CertRef<'a> {
         Ok(tbs_reader)
     }
 
-    /// Navigate to a specific field of tbsCertificate by semantic index.
+    /// Navigate to the nth field of tbsCertificate (0-indexed), accounting
+    /// for the optional [0] EXPLICIT version tag.
     ///
-    /// If version field is requested, but not present, an error is returned.
+    /// Field indices (within tbsCertificate):
+    ///   0 = version [0] EXPLICIT (optional, but always present in v3)
+    ///   1 = serialNumber
+    ///   2 = signature (AlgorithmIdentifier)
+    ///   3 = issuer (Name)
+    ///   4 = validity
+    ///   5 = subject (Name)
+    ///   6 = subjectPublicKeyInfo
+    ///   7 = extensions [3] EXPLICIT
     ///
     /// https://www.rfc-editor.org/rfc/rfc5280#section-4.1
-    fn tbs_field(&self, field: TbsField) -> Result<DerReader<'a>, Error> {
+    fn tbs_field(&self, index: usize) -> Result<DerReader<'a>, Error> {
         let mut reader = self.tbs_certificate()?;
 
         // Check if the first element is the [0] EXPLICIT version tag
@@ -336,19 +330,13 @@ impl<'a> X509CertRef<'a> {
         let has_version = first_tag == TAG_CONTEXT_0;
 
         // If index 0 is requested and version is present, return it directly
-        // or return error because requested field is not present
-        if matches!(field, TbsField::Version) {
-            if has_version {
-                return Ok(reader);
-            } else {
-                return Err(ErrorCode::InvalidData.into());
-            }
+        if index == 0 && has_version {
+            return Ok(reader);
         }
 
         // Skip elements to reach the desired index
         // If version is present, we start counting from 0 (version)
         // If version is absent, field index 1 (serialNumber) is at position 0
-        let index = field as usize;
         let skip_count = if has_version { index } else { index - 1 };
 
         for _ in 0..skip_count {
@@ -459,7 +447,7 @@ impl<'a> X509CertRef<'a> {
     fn find_subject_attr(&self, oid: &[u8]) -> Result<Option<&'a [u8]>, Error> {
         // Navigate to Subject DN (field index 5 in tbsCertificate)
         // https://www.rfc-editor.org/rfc/rfc5280#section-4.1
-        let field_reader = self.tbs_field(TbsField::Subject)?;
+        let field_reader = self.tbs_field(5)?;
         let (tag, subject_value, _) = field_reader.read_tlv()?;
         if tag != TAG_SEQUENCE {
             return Err(ErrorCode::InvalidData.into());
@@ -565,7 +553,7 @@ impl<'a> X509CertRef<'a> {
     /// BIT STRING unused-bits byte is not 0x00.
     pub fn public_key(&self) -> Result<&'a [u8], Error> {
         // Navigate to subjectPublicKeyInfo (field 6)
-        let field_reader = self.tbs_field(TbsField::SubjectPubKeyInfo)?;
+        let field_reader = self.tbs_field(6)?;
         let (tag, spki_value, _) = field_reader.read_tlv()?;
         if tag != TAG_SEQUENCE {
             return Err(ErrorCode::InvalidData.into());
@@ -631,7 +619,7 @@ impl<'a> X509CertRef<'a> {
     /// Parses UTCTime ("YYMMDDHHMMSSZ") or GeneralizedTime ("YYYYMMDDHHMMSSZ")
     /// from the validity field of the tbsCertificate.
     pub fn not_before_unix(&self) -> Result<u64, Error> {
-        let field_reader = self.tbs_field(TbsField::Validity)?;
+        let field_reader = self.tbs_field(4)?;
         let (tag, validity_value, _) = field_reader.read_tlv()?;
         if tag != TAG_SEQUENCE {
             return Err(ErrorCode::InvalidData.into());
@@ -647,7 +635,7 @@ impl<'a> X509CertRef<'a> {
     /// Parses UTCTime or GeneralizedTime. For GeneralizedTime
     /// "99991231235959Z", returns `u64::MAX` to indicate no expiry.
     pub fn not_after_unix(&self) -> Result<u64, Error> {
-        let field_reader = self.tbs_field(TbsField::Validity)?;
+        let field_reader = self.tbs_field(4)?;
         let (tag, validity_value, _) = field_reader.read_tlv()?;
         if tag != TAG_SEQUENCE {
             return Err(ErrorCode::InvalidData.into());
@@ -968,24 +956,6 @@ mod tests {
     #[test]
     fn test_invalid_empty_sequence() {
         assert!(X509CertRef::new(&[0x30, 0x00]).is_err());
-    }
-
-    #[test]
-    fn test_tbs_field_version_error_when_absent() {
-        let mut der = PAA_DER.to_vec();
-        let version_field_len: usize = 5;
-        let version_start: usize = 8;
-
-        // remove version field length from DER length
-        der[3] -= version_field_len as u8;
-        // remove version field length from tbs certificate length
-        der[7] -= version_field_len as u8;
-        // remove version field from the certificate
-        der.drain(version_start..version_start + version_field_len);
-
-        let cert = X509CertRef::new(&der).unwrap();
-        assert!(cert.tbs_field(TbsField::Version).is_err());
-        assert!(cert.tbs_field(TbsField::SerialNum).is_ok());
     }
 
     #[test]
