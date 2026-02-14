@@ -125,7 +125,8 @@ impl ImTests {
         warn!("Building examples: {}", bins.join(", "));
 
         let mut cmd = Command::new("cargo");
-        cmd.arg("build")
+        cmd.current_dir(&self.workspace_dir)
+            .arg("build")
             .arg("-p")
             .arg("rs-matter-examples");
 
@@ -359,11 +360,14 @@ async fn run_im_test_flow<C: Crypto>(
     // Step 1: Establish PASE session
     info!("Step 1: Establishing PASE session...");
 
-    let mut exchange = Exchange::initiate_unsecured(matter, crypto, peer_addr).await?;
-    info!("Exchange initiated: {}", exchange.id());
-
-    // Run PASE handshake with timeout
+    // Use a block to ensure the PASE exchange is dropped before creating IM exchanges.
+    // This is important because the PASE exchange may hold the RX buffer, which would
+    // block process_rx from receiving new packets.
     {
+        let mut exchange = Exchange::initiate_unsecured(matter, crypto, peer_addr).await?;
+        info!("Exchange initiated: {}", exchange.id());
+
+        // Run PASE handshake with timeout
         let mut pase_fut =
             core::pin::pin!(PaseInitiator::initiate(&mut exchange, crypto, passcode));
         let mut timeout = core::pin::pin!(Timer::after(embassy_time::Duration::from_secs(30)));
@@ -381,96 +385,143 @@ async fn run_im_test_flow<C: Crypto>(
                 return Err(rs_matter::error::ErrorCode::RxTimeout.into());
             }
         }
+        // exchange is dropped here, releasing any held RX buffer
     }
 
     // Step 2: Create a new exchange on the secure session for IM operations
     info!("Step 2: Creating secure exchange for IM operations...");
 
-    // Get the session we just established and create a new exchange
-    let mut im_exchange = Exchange::initiate(matter, 0, 0, true).await?;
-    info!("IM exchange initiated: {}", im_exchange.id());
-
-    // Step 3: Read OnOff attribute
-    info!("Step 3: Reading OnOff attribute (endpoint 1, cluster 0x0006, attr 0x0000)...");
-
-    let read_result = {
-        let mut read_fut = core::pin::pin!(test_read_onoff(&mut im_exchange));
-        let mut timeout = core::pin::pin!(Timer::after(embassy_time::Duration::from_secs(10)));
-
-        match select(&mut read_fut, &mut timeout).await {
-            Either::First(result) => result,
-            Either::Second(_) => {
-                warn!("Read operation timed out");
-                Err(rs_matter::error::ErrorCode::RxTimeout.into())
-            }
-        }
-    };
-
-    match read_result {
-        Ok(on_off_value) => {
-            info!("Read OnOff attribute: value = {}", on_off_value);
-        }
-        Err(e) => {
-            warn!("Failed to read OnOff attribute: {:?}", e);
-            return Err(e);
+    // Debug: print session info
+    {
+        let session_mgr = matter.transport_mgr.session_mgr.borrow();
+        info!("Sessions in manager: {}", session_mgr.iter().count());
+        for sess in session_mgr.iter() {
+            // Print detailed address info
+            let addr = sess.get_peer_addr();
+            info!(
+                "  Session: local_sess_id={}, peer_sess_id={}, peer_addr={}, encrypted={}, mode={:?}",
+                sess.get_local_sess_id(),
+                sess.get_peer_sess_id(),
+                addr,
+                sess.is_encrypted(),
+                sess.get_session_mode(),
+            );
+            // Print peer_nodeid and fabric_idx for matching
+            info!(
+                "    peer_nodeid={:?}, fabric_idx={}",
+                sess.get_peer_node_id(),
+                sess.get_local_fabric_idx(),
+            );
         }
     }
+    info!("Expected peer_addr: {:?}", peer_addr);
+    info!("Looking for session with fabric_idx=0, peer_node_id=0, secure=true");
+
+    // Step 3: Read OnOff attribute
+    // Each IM operation uses its own exchange, scoped to ensure proper cleanup.
+    // This is important because exchanges may hold the RX buffer, blocking process_rx.
+    info!("Step 3: Reading OnOff attribute (endpoint 1, cluster 0x0006, attr 0x0000)...");
+
+    let initial_on_off = {
+        let mut im_exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        info!("IM exchange initiated: {}", im_exchange.id());
+
+        let read_result = {
+            let mut read_fut = core::pin::pin!(test_read_onoff(&mut im_exchange));
+            let mut timeout = core::pin::pin!(Timer::after(embassy_time::Duration::from_secs(10)));
+
+            match select(&mut read_fut, &mut timeout).await {
+                Either::First(result) => result,
+                Either::Second(_) => {
+                    warn!("Read operation timed out");
+                    Err(rs_matter::error::ErrorCode::RxTimeout.into())
+                }
+            }
+        };
+
+        let on_off_value = match read_result {
+            Ok(v) => {
+                info!("Read OnOff attribute: value = {}", v);
+                v
+            }
+            Err(e) => {
+                warn!("Failed to read OnOff attribute: {:?}", e);
+                return Err(e);
+            }
+        };
+
+        on_off_value
+        // im_exchange is dropped here; ACK was already sent by ImClient
+    };
 
     // Step 4: Invoke Toggle command
     info!("Step 4: Invoking Toggle command (endpoint 1, cluster 0x0006, cmd 0x0002)...");
 
-    // Create a new exchange for the invoke
-    let mut invoke_exchange = Exchange::initiate(matter, 0, 0, true).await?;
+    {
+        let mut invoke_exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        info!("Invoke exchange initiated: {}", invoke_exchange.id());
 
-    let invoke_result = {
-        let mut invoke_fut = core::pin::pin!(test_invoke_toggle(&mut invoke_exchange));
-        let mut timeout = core::pin::pin!(Timer::after(embassy_time::Duration::from_secs(10)));
+        let invoke_result = {
+            let mut invoke_fut = core::pin::pin!(test_invoke_toggle(&mut invoke_exchange));
+            let mut timeout = core::pin::pin!(Timer::after(embassy_time::Duration::from_secs(10)));
 
-        match select(&mut invoke_fut, &mut timeout).await {
-            Either::First(result) => result,
-            Either::Second(_) => {
-                warn!("Invoke operation timed out");
-                Err(rs_matter::error::ErrorCode::RxTimeout.into())
+            match select(&mut invoke_fut, &mut timeout).await {
+                Either::First(result) => result,
+                Either::Second(_) => {
+                    warn!("Invoke operation timed out");
+                    Err(rs_matter::error::ErrorCode::RxTimeout.into())
+                }
+            }
+        };
+
+        match invoke_result {
+            Ok(status) => {
+                info!("Toggle command completed with status: {:?}", status);
+            }
+            Err(e) => {
+                warn!("Failed to invoke Toggle command: {:?}", e);
+                return Err(e);
             }
         }
-    };
-
-    match invoke_result {
-        Ok(status) => {
-            info!("Toggle command completed with status: {:?}", status);
-        }
-        Err(e) => {
-            warn!("Failed to invoke Toggle command: {:?}", e);
-            return Err(e);
-        }
+        // invoke_exchange is dropped here; ACK was already sent by ImClient
     }
 
     // Step 5: Read OnOff attribute again to verify toggle worked
     info!("Step 5: Reading OnOff attribute again to verify toggle...");
 
-    let mut verify_exchange = Exchange::initiate(matter, 0, 0, true).await?;
+    {
+        let mut verify_exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        info!("Verify exchange initiated: {}", verify_exchange.id());
 
-    let verify_result = {
-        let mut read_fut = core::pin::pin!(test_read_onoff(&mut verify_exchange));
-        let mut timeout = core::pin::pin!(Timer::after(embassy_time::Duration::from_secs(10)));
+        let verify_result = {
+            let mut read_fut = core::pin::pin!(test_read_onoff(&mut verify_exchange));
+            let mut timeout = core::pin::pin!(Timer::after(embassy_time::Duration::from_secs(10)));
 
-        match select(&mut read_fut, &mut timeout).await {
-            Either::First(result) => result,
-            Either::Second(_) => {
-                warn!("Verify read operation timed out");
-                Err(rs_matter::error::ErrorCode::RxTimeout.into())
+            match select(&mut read_fut, &mut timeout).await {
+                Either::First(result) => result,
+                Either::Second(_) => {
+                    warn!("Verify read operation timed out");
+                    Err(rs_matter::error::ErrorCode::RxTimeout.into())
+                }
+            }
+        };
+
+        match verify_result {
+            Ok(on_off_value) => {
+                info!("Verified OnOff attribute: value = {}", on_off_value);
+                // Verify toggle actually worked
+                if on_off_value == initial_on_off {
+                    warn!("OnOff value didn't change after toggle!");
+                } else {
+                    info!("Toggle verified: {} -> {}", initial_on_off, on_off_value);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to verify OnOff attribute: {:?}", e);
+                return Err(e);
             }
         }
-    };
-
-    match verify_result {
-        Ok(on_off_value) => {
-            info!("Verified OnOff attribute: value = {}", on_off_value);
-        }
-        Err(e) => {
-            warn!("Failed to verify OnOff attribute: {:?}", e);
-            return Err(e);
-        }
+        // verify_exchange is dropped here; ACK was already sent by ImClient
     }
 
     info!("All IM client tests completed successfully!");
@@ -509,11 +560,11 @@ async fn test_invoke_toggle(exchange: &mut Exchange<'_>) -> Result<IMStatusCode,
         cmd: Some(CMD_TOGGLE),
     };
 
-    // Toggle command has no data (empty struct)
-    let empty_data = [];
+    // Toggle command has no data - use TLV-encoded empty struct (0x15 = struct start, 0x18 = end container)
+    let empty_struct_tlv = [0x15, 0x18];
     let cmd_data = CmdData {
         path,
-        data: TLVElement::new(&empty_data),
+        data: TLVElement::new(&empty_struct_tlv),
     };
 
     let cmds = [cmd_data];
