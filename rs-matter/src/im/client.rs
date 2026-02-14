@@ -155,16 +155,43 @@ impl ImClient {
     ) -> Result<ReportDataResp<'a>, Error> {
         let req = ReadRequestBuilder::attributes(attr_paths, fabric_filtered);
 
+        debug!(
+            "ImClient::read - Sending ReadRequest on exchange {}",
+            exchange.id()
+        );
+        trace!(
+            "ReadRequest: attr_paths={:?}, fabric_filtered={}",
+            attr_paths,
+            fabric_filtered
+        );
+
         // Send ReadRequest
-        exchange
+        debug!("ImClient::read - About to call send_with");
+        let send_result = exchange
             .send_with(|_, wb| {
                 req.to_tlv(&TagType::Anonymous, wb)?;
                 Ok(Some(OpCode::ReadRequest.into()))
             })
-            .await?;
+            .await;
+        debug!(
+            "ImClient::read - send_with completed with: {:?}",
+            send_result.as_ref().map(|_| "Ok")
+        );
+        send_result?;
+
+        debug!("ImClient::read - ReadRequest sent successfully, now waiting for ReportData...");
 
         // Receive ReportData
-        exchange.recv_fetch().await?;
+        let recv_result = exchange.recv_fetch().await;
+
+        debug!(
+            "ImClient::read - recv_fetch completed with: {:?}",
+            recv_result.as_ref().map(|_| "Ok")
+        );
+
+        recv_result?;
+
+        debug!("ImClient::read - Received response successfully");
 
         // Check opcode and extract suppress_response flag before borrowing payload
         let suppress_response = {
@@ -177,14 +204,24 @@ impl ImClient {
             resp.suppress_response.unwrap_or(false)
         };
 
+        debug!("ImClient::read - suppress_response={}", suppress_response);
+
         // Send StatusResponse if not suppressed
         if !suppress_response {
+            debug!("ImClient::read - Sending StatusResponse");
             exchange
                 .send_with(|_, wb| {
                     StatusResp::write(wb, IMStatusCode::Success)?;
                     Ok(Some(OpCode::StatusResponse.into()))
                 })
                 .await?;
+            debug!("ImClient::read - StatusResponse sent");
+        } else {
+            // If suppress_response is true, we still need to send an ACK for the ReportData
+            // so that when the exchange is dropped, there's no pending ACK that could
+            // cause race conditions with subsequent exchanges.
+            debug!("ImClient::read - Sending standalone ACK");
+            exchange.acknowledge().await?;
         }
 
         // Re-parse the response for return (the rx buffer is still valid)
@@ -211,6 +248,11 @@ impl ImClient {
         cmd_data: &[CmdData<'_>],
         timed_timeout_ms: Option<u16>,
     ) -> Result<InvokeResp<'a>, Error> {
+        debug!(
+            "ImClient::invoke - Starting invoke on exchange {}",
+            exchange.id()
+        );
+
         // If timed, send TimedRequest first
         if let Some(timeout_ms) = timed_timeout_ms {
             Self::send_timed_request(exchange, timeout_ms).await?;
@@ -219,20 +261,31 @@ impl ImClient {
         let req = InvokeRequestBuilder::new(cmd_data, timed_timeout_ms.is_some());
 
         // Send InvokeRequest
+        debug!("ImClient::invoke - Sending InvokeRequest");
         exchange
             .send_with(|_, wb| {
                 req.to_tlv(&TagType::Anonymous, wb)?;
                 Ok(Some(OpCode::InvokeRequest.into()))
             })
             .await?;
+        debug!("ImClient::invoke - InvokeRequest sent, waiting for response");
 
         // Receive InvokeResponse
         exchange.recv_fetch().await?;
+        debug!("ImClient::invoke - Received response");
 
+        // Check opcode before acknowledging
+        {
+            let rx = exchange.rx()?;
+            Self::check_opcode(rx.meta().proto_opcode, OpCode::InvokeResponse)?;
+        }
+
+        // Send ACK for the InvokeResponse so there's no pending ACK when the exchange is dropped.
+        // This prevents race conditions with subsequent exchanges.
+        exchange.acknowledge().await?;
+
+        // Parse response (rx buffer is still valid after acknowledge)
         let rx = exchange.rx()?;
-        Self::check_opcode(rx.meta().proto_opcode, OpCode::InvokeResponse)?;
-
-        // Parse response
         let resp = InvokeResp::from_tlv(&TLVElement::new(rx.payload()))?;
 
         Ok(resp)
@@ -273,10 +326,18 @@ impl ImClient {
         // Receive WriteResponse
         exchange.recv_fetch().await?;
 
-        let rx = exchange.rx()?;
-        Self::check_opcode(rx.meta().proto_opcode, OpCode::WriteResponse)?;
+        // Check opcode before acknowledging
+        {
+            let rx = exchange.rx()?;
+            Self::check_opcode(rx.meta().proto_opcode, OpCode::WriteResponse)?;
+        }
 
-        // Parse response
+        // Send ACK for the WriteResponse so there's no pending ACK when the exchange is dropped.
+        // This prevents race conditions with subsequent exchanges.
+        exchange.acknowledge().await?;
+
+        // Parse response (rx buffer is still valid after acknowledge)
+        let rx = exchange.rx()?;
         let resp = WriteResp::from_tlv(&TLVElement::new(rx.payload()))?;
 
         Ok(resp)
