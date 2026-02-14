@@ -26,12 +26,14 @@ use log::{Level, LevelFilter};
 
 use crate::controllertest::ControllerTests;
 use crate::exchangetest::ExchangeTests;
+use crate::imtest::ImTests;
 use crate::itest::ITests;
 use crate::mdnstest::MdnsTests;
 use crate::pasetest::PaseTests;
 
 mod controllertest;
 mod exchangetest;
+mod imtest;
 mod itest;
 mod mdnstest;
 mod pasetest;
@@ -144,6 +146,33 @@ enum Command {
         /// Wait time (ms) for the device to start when starting a device locally
         #[arg(long, default_value_t = 2000)]
         device_wait_ms: u64,
+    },
+    /// Run IM client integration test (PASE + read/invoke) against a device
+    Imtest {
+        /// Target device IP address
+        #[arg(long, default_value = "127.0.0.1")]
+        device_ip: String,
+        /// Target device port
+        #[arg(long, default_value_t = rs_matter::MATTER_PORT)]
+        device_port: u16,
+        /// Do not start a local device example (assume one is already running)
+        #[arg(long)]
+        no_start_device: bool,
+        /// Device example binary to run when starting a device locally
+        #[arg(long, default_value = "onoff_light")]
+        device_bin: String,
+        /// Cargo features to build examples with
+        #[arg(long)]
+        features: Vec<String>,
+        /// Build profile (debug or release)
+        #[arg(long, default_value = "debug")]
+        profile: String,
+        /// Wait time (ms) for the device to start when starting a device locally
+        #[arg(long, default_value_t = 2000)]
+        device_wait_ms: u64,
+        /// Device passcode for PASE authentication
+        #[arg(long, default_value_t = imtest::DEFAULT_PASSCODE)]
+        passcode: u32,
     },
     /// Test mDNS discovery against chip-all-clusters-app (calls `mdnstest-setup` as necessary)
     Mdnstest {
@@ -275,6 +304,25 @@ impl Command {
                 features,
                 profile,
                 *device_wait_ms,
+            ),
+            Command::Imtest {
+                device_ip,
+                device_port,
+                no_start_device,
+                device_bin,
+                features,
+                profile,
+                device_wait_ms,
+                passcode,
+            } => ImTests::new(workspace_dir(), print_cmd_output).run(
+                device_ip,
+                *device_port,
+                !*no_start_device,
+                device_bin,
+                features,
+                profile,
+                *device_wait_ms,
+                *passcode,
             ),
             Command::ControllertestTools => {
                 ControllerTests::new(workspace_dir(), print_cmd_output).print_tooling()

@@ -33,6 +33,7 @@ pub use status::*;
 pub use timed::*;
 
 pub mod busy;
+pub mod client;
 
 mod attr;
 mod invoke;
