@@ -20,6 +20,7 @@
 //! This module provides client-side functionality for sending IM requests
 //! (Read, Write, Invoke) to Matter devices and processing their responses.
 
+pub mod commissioning;
 pub use super::{AttrId, ClusterId, EndptId};
 
 use crate::error::{Error, ErrorCode};
