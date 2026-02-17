@@ -186,16 +186,19 @@ fn parse_response(
     // Process answer section
     if let Ok(answer) = message.answer() {
         for record in answer.flatten() {
-            let owner = record.owner().to_string();
+            // 128 characters in case of extra long names
+            let mut owner = heapless::String::<128>::new();
+            let _ = write!(&mut owner, "{}", record.owner());
 
             // Try to parse as PTR record (service instance discovery)
             if let Ok(Some(ptr)) = record.to_record::<Ptr<_>>() {
-                let instance_name = ptr.data().ptrdname().to_string();
+                let mut instance_name = heapless::String::<64>::new();
+                let _ = write!(&mut instance_name, "{}", ptr.data().ptrdname());
 
                 // Check if we already have this instance
                 let exists = states
                     .iter()
-                    .any(|s| s.device.instance_name.as_str() == instance_name.as_str());
+                    .any(|s| names_match(s.device.instance_name.as_str(), instance_name.as_str()));
 
                 if !exists && states.len() < MAX_DISCOVERED_DEVICES {
                     let mut state = DiscoveryState::default();
