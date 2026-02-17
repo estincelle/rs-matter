@@ -70,6 +70,12 @@ use rs_matter::dm::{
     Node,
 };
 use rs_matter::error::Error;
+use rs_matter::im::client::commissioning::{
+    ArmFailSafeResponse, AttestationResponse, BasicCommissioningInfo, CSRResponse,
+    CertificateChainResponse, CertificateChainTypeEnum, CommissioningCompleteResponse,
+    CommissioningErrorEnum, RegulatoryLocationTypeEnum, SetRegulatoryConfigResponse,
+    SetTCAcknowledgementsResponse,
+};
 use rs_matter::im::client::ImClient;
 use rs_matter::im::{AttrResp, CmdResp, IMStatusCode};
 use rs_matter::respond::DefaultResponder;
@@ -243,7 +249,10 @@ async fn run_controller_flow<C: Crypto>(matter: &Matter<'_>, crypto: &C) -> Resu
     info!("=== Phase 2: PASE Session Establishment ===");
     establish_pase_session(matter, crypto, peer_addr, TEST_PASSCODE).await?;
 
-    info!("=== Phase 3: Interaction Model Operations ===");
+    info!("=== Phase 3: Commissioning Info & Commands ===");
+    test_commissioning_commands(matter).await?;
+
+    info!("=== Phase 4: Interaction Model Operations ===");
     test_onoff_cluster(matter).await?;
 
     info!("=== All commissioning test phases completed successfully! ===");
@@ -256,11 +265,7 @@ async fn run_controller_flow<C: Crypto>(matter: &Matter<'_>, crypto: &C) -> Resu
 
 async fn discover_and_resolve_device(timeout_ms: u32) -> Result<Address, Error> {
     info!("Starting mDNS discovery with discriminator: {TEST_DISCRIMINATOR}");
-    let filter = CommissionableFilter {
-        discriminator: Some(TEST_DISCRIMINATOR),
-        ..Default::default()
-    };
-    let device = discover_device::<MAX_DEVICE_ADDRESSES>(&filter, timeout_ms).await?;
+    let device = discover_device::<MAX_DEVICE_ADDRESSES>(TEST_DISCRIMINATOR, timeout_ms).await?;
 
     info!(
         "Discovered: {} with {} address(es), discriminator={}",
@@ -304,11 +309,16 @@ async fn discover_device<const A: usize>(
 
 #[cfg(not(feature = "astro-dnssd"))]
 async fn discover_device<const A: usize>(
-    filter: &CommissionableFilter,
+    discriminator: u16,
     timeout_ms: u32,
 ) -> Result<DiscoveredDevice<A>, Error> {
     use rs_matter::transport::network::mdns::builtin::discover_commissionable;
     use rs_matter::transport::network::mdns::{MDNS_IPV4_BROADCAST_ADDR, MDNS_IPV6_BROADCAST_ADDR};
+
+    let filter = CommissionableFilter {
+        discriminator: Some(discriminator),
+        ..Default::default()
+    };
 
     // Create a dedicated mDNS socket bound to port 5353
     // This is separate from the Matter communication socket because mDNS
@@ -348,7 +358,7 @@ async fn discover_device<const A: usize>(
     let devices = discover_commissionable::<_, _, MAX_DISCOVERED_DEVICES, A>(
         &mut &mdns_socket,
         &mut &mdns_socket,
-        filter,
+        &filter,
         timeout_ms,
         &mut mdns_buf,
         Some(ipv4_addr),
@@ -357,10 +367,7 @@ async fn discover_device<const A: usize>(
     .await?;
 
     devices.into_iter().next().ok_or_else(|| {
-        warn!(
-            "No devices found matching discriminator {:#?}",
-            filter.discriminator
-        );
+        warn!("No devices found matching discriminator {discriminator}",);
         rs_matter::error::ErrorCode::NotFound.into()
     })
 }
@@ -449,7 +456,266 @@ async fn establish_pase_session<C: Crypto>(
 }
 
 // ============================================================================
-// Phase 3: Interaction Model Operations
+// Phase 3: Commissioning Commands
+// ============================================================================
+
+async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
+    // --- Attribute Reads (kReadCommissioningInfo) ---
+
+    // Step 3a: Read BasicCommissioningInfo
+    info!("Step 3a: Reading BasicCommissioningInfo...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(
+            test_read_basic_commissioning_info(&mut exchange),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
+        let fail_safe_expiry = resp.fail_safe_expiry_length_seconds()?;
+        let max_cumulative = resp.max_cumulative_failsafe_seconds()?;
+        info!(
+            "BasicCommissioningInfo: fail_safe_expiry={}s, max_cumulative={}s",
+            fail_safe_expiry, max_cumulative
+        );
+    }
+
+    // Step 3b: Read RegulatoryConfig
+    info!("Step 3b: Reading RegulatoryConfig...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp =
+            run_with_timeout(test_read_regulatory_config(&mut exchange), IM_TIMEOUT_SECS).await?;
+        info!("RegulatoryConfig: {:?}", resp);
+    }
+
+    // Step 3c: Read LocationCapability
+    info!("Step 3c: Reading LocationCapability...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(
+            test_read_location_capability(&mut exchange),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
+        info!("LocationCapability: {:?}", resp);
+    }
+
+    // Step 3d: Read SupportsConcurrentConnection
+    info!("Step 3d: Reading SupportsConcurrentConnection...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(
+            test_read_supports_concurrent_connection(&mut exchange),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
+        info!("SupportsConcurrentConnection: {}", resp);
+    }
+
+    // --- Commissioning Commands ---
+
+    // Step 3e: ArmFailSafe
+    info!("Step 3e: Testing ArmFailSafe command...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(test_arm_fail_safe(&mut exchange), IM_TIMEOUT_SECS).await?;
+        let error_code = resp.error_code()?;
+        info!("ArmFailSafe response: error_code={:?}", error_code);
+        assert!(
+            matches!(error_code, CommissioningErrorEnum::OK),
+            "ArmFailSafe failed: {:?}",
+            error_code
+        );
+    }
+
+    // Step 3f: SetRegulatoryConfig
+    info!("Step 3f: Testing SetRegulatoryConfig command...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp =
+            run_with_timeout(test_set_regulatory_config(&mut exchange), IM_TIMEOUT_SECS).await?;
+        let error_code = resp.error_code()?;
+        info!("SetRegulatoryConfig response: error_code={:?}", error_code);
+        assert!(
+            matches!(error_code, CommissioningErrorEnum::OK),
+            "SetRegulatoryConfig failed: {:?}",
+            error_code
+        );
+    }
+
+    // Step 3g: SetTCAcknowledgements
+    info!("Step 3g: Testing SetTCAcknowledgements command...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp =
+            run_with_timeout(test_set_tc_acknowledgements(&mut exchange), IM_TIMEOUT_SECS).await?;
+        let error_code = resp.error_code()?;
+        info!(
+            "SetTCAcknowledgements response: error_code={:?}",
+            error_code
+        );
+        assert!(
+            matches!(error_code, CommissioningErrorEnum::OK),
+            "SetTCAcknowledgements failed: {:?}",
+            error_code
+        );
+    }
+
+    // Step 3h: AttestationRequest
+    info!("Step 3h: Testing AttestationRequest command...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp =
+            run_with_timeout(test_attestation_request(&mut exchange), IM_TIMEOUT_SECS).await?;
+        let attestation_elements = resp.attestation_elements()?;
+        let attestation_signature = resp.attestation_signature()?;
+        info!(
+            "AttestationRequest response: elements_len={}, signature_len={}",
+            attestation_elements.len(),
+            attestation_signature.len()
+        );
+    }
+
+    // Step 3i: CertificateChainRequest (DAC)
+    info!("Step 3i: Testing CertificateChainRequest (DAC) command...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(
+            test_certificate_chain_request(&mut exchange, CertificateChainTypeEnum::DACCertificate),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
+        let certificate = resp.certificate()?;
+        info!(
+            "CertificateChainRequest (DAC) response: certificate_len={}",
+            certificate.len()
+        );
+    }
+
+    // Step 3j: CertificateChainRequest (PAI)
+    info!("Step 3j: Testing CertificateChainRequest (PAI) command...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(
+            test_certificate_chain_request(&mut exchange, CertificateChainTypeEnum::PAICertificate),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
+        let certificate = resp.certificate()?;
+        info!(
+            "CertificateChainRequest (PAI) response: certificate_len={}",
+            certificate.len()
+        );
+    }
+
+    // Step 3k: CSRRequest
+    info!("Step 3k: Testing CSRRequest command...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(test_csr_request(&mut exchange), IM_TIMEOUT_SECS).await?;
+        let nocsr_elements = resp.nocsr_elements()?;
+        let attestation_signature = resp.attestation_signature()?;
+        info!(
+            "CSRRequest response: nocsr_elements_len={}, signature_len={}",
+            nocsr_elements.len(),
+            attestation_signature.len()
+        );
+    }
+
+    // Step 3l: CommissioningComplete
+    // This should fail because we haven't completed all commissioning steps
+    // (no NOC provisioned, no CASE session). The device should return a
+    // commissioning error, not IM-level success.
+    info!("Step 3l: Testing CommissioningComplete command (expected to fail)...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp =
+            run_with_timeout(test_commissioning_complete(&mut exchange), IM_TIMEOUT_SECS).await?;
+        let error_code = resp.error_code()?;
+        info!(
+            "CommissioningComplete response: error_code={:?}",
+            error_code
+        );
+        assert!(
+            !matches!(error_code, CommissioningErrorEnum::OK),
+            "CommissioningComplete should fail when not fully commissioned"
+        );
+    }
+
+    info!("All commissioning command tests completed successfully!");
+    Ok(())
+}
+
+async fn test_arm_fail_safe<'a>(
+    exchange: &'a mut Exchange<'_>,
+) -> Result<ArmFailSafeResponse<'a>, Error> {
+    ImClient::arm_fail_safe(exchange, 60, 1).await
+}
+
+async fn test_set_regulatory_config<'a>(
+    exchange: &'a mut Exchange<'_>,
+) -> Result<SetRegulatoryConfigResponse<'a>, Error> {
+    ImClient::set_regulatory_config(exchange, RegulatoryLocationTypeEnum::IndoorOutdoor, "US", 2)
+        .await
+}
+
+async fn test_attestation_request<'a>(
+    exchange: &'a mut Exchange<'_>,
+) -> Result<AttestationResponse<'a>, Error> {
+    let nonce = [0x42u8; 32];
+    ImClient::attestation_request(exchange, &nonce).await
+}
+
+async fn test_certificate_chain_request<'a>(
+    exchange: &'a mut Exchange<'_>,
+    cert_type: CertificateChainTypeEnum,
+) -> Result<CertificateChainResponse<'a>, Error> {
+    ImClient::certificate_chain_request(exchange, cert_type).await
+}
+
+async fn test_csr_request<'a>(exchange: &'a mut Exchange<'_>) -> Result<CSRResponse<'a>, Error> {
+    let nonce = [0x43u8; 32];
+    ImClient::csr_request(exchange, &nonce, false).await
+}
+
+async fn test_commissioning_complete<'a>(
+    exchange: &'a mut Exchange<'_>,
+) -> Result<CommissioningCompleteResponse<'a>, Error> {
+    ImClient::commissioning_complete(exchange).await
+}
+
+async fn test_read_basic_commissioning_info<'a>(
+    exchange: &'a mut Exchange<'_>,
+) -> Result<BasicCommissioningInfo<'a>, Error> {
+    ImClient::read_basic_commissioning_info(exchange).await
+}
+
+async fn test_read_regulatory_config(
+    exchange: &mut Exchange<'_>,
+) -> Result<RegulatoryLocationTypeEnum, Error> {
+    ImClient::read_regulatory_config(exchange).await
+}
+
+async fn test_read_location_capability(
+    exchange: &mut Exchange<'_>,
+) -> Result<RegulatoryLocationTypeEnum, Error> {
+    ImClient::read_location_capability(exchange).await
+}
+
+async fn test_read_supports_concurrent_connection(
+    exchange: &mut Exchange<'_>,
+) -> Result<bool, Error> {
+    ImClient::read_supports_concurrent_connection(exchange).await
+}
+
+async fn test_set_tc_acknowledgements<'a>(
+    exchange: &'a mut Exchange<'_>,
+) -> Result<SetTCAcknowledgementsResponse<'a>, Error> {
+    ImClient::set_tc_acknowledgements(exchange, 1, 0x0001).await
+}
+
+// ============================================================================
+// Phase 4: Interaction Model Operations
 // ============================================================================
 
 async fn test_onoff_cluster(matter: &Matter<'_>) -> Result<(), Error> {
@@ -475,20 +741,30 @@ async fn test_onoff_cluster(matter: &Matter<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-async fn read_onoff_with_timeout(matter: &Matter<'_>) -> Result<bool, Error> {
-    let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
-    debug!("IM read exchange initiated: {}", exchange.id());
+/// Helper to run a future with a timeout.
+async fn run_with_timeout<T, F: core::future::Future<Output = Result<T, Error>>>(
+    fut: F,
+    timeout_secs: u64,
+) -> Result<T, Error> {
+    let mut fut = core::pin::pin!(fut);
+    let mut timeout = core::pin::pin!(Timer::after(embassy_time::Duration::from_secs(
+        timeout_secs
+    )));
 
-    let mut read_fut = pin!(read_onoff(&mut exchange));
-    let mut timeout = pin!(Timer::after(Duration::from_secs(IM_TIMEOUT_SECS)));
-
-    match select(&mut read_fut, &mut timeout).await {
+    match select(&mut fut, &mut timeout).await {
         Either::First(result) => result,
         Either::Second(_) => {
-            warn!("Read operation timed out");
+            warn!("Operation timed out after {} seconds", timeout_secs);
             Err(rs_matter::error::ErrorCode::RxTimeout.into())
         }
     }
+}
+
+async fn read_onoff_with_timeout(matter: &Matter<'_>) -> Result<bool, Error> {
+    let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+    debug!("IM exchange initiated: {}", exchange.id());
+
+    run_with_timeout(read_onoff(&mut exchange), IM_TIMEOUT_SECS).await
 }
 
 async fn read_onoff(exchange: &mut Exchange<'_>) -> Result<bool, Error> {
@@ -507,19 +783,11 @@ async fn invoke_toggle_with_timeout(matter: &Matter<'_>) -> Result<IMStatusCode,
     let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
     debug!("Invoke exchange initiated: {}", exchange.id());
 
-    let mut invoke_fut = pin!(invoke_toggle(&mut exchange));
-    let mut timeout = pin!(Timer::after(Duration::from_secs(IM_TIMEOUT_SECS)));
-
-    match select(&mut invoke_fut, &mut timeout).await {
-        Either::First(result) => result,
-        Either::Second(_) => {
-            warn!("Invoke operation timed out");
-            Err(rs_matter::error::ErrorCode::RxTimeout.into())
-        }
-    }
+    run_with_timeout(invoke_toggle(&mut exchange), IM_TIMEOUT_SECS).await
 }
 
 async fn invoke_toggle(exchange: &mut Exchange<'_>) -> Result<IMStatusCode, Error> {
+    // Toggle command has no data - build empty TLV struct
     let mut buf = [0u8; 8];
     let tail = {
         let mut wb = WriteBuf::new(&mut buf);
