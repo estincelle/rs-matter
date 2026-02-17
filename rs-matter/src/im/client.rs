@@ -20,6 +20,8 @@
 //! This module provides client-side functionality for sending IM requests
 //! (Read, Write, Invoke) to Matter devices and processing their responses.
 
+pub mod commissioning;
+
 use crate::error::{Error, ErrorCode};
 use crate::tlv::{FromTLV, TLVElement, TagType, ToTLV};
 use crate::transport::exchange::Exchange;
