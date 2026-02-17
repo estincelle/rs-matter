@@ -33,6 +33,9 @@
 //! - [`csr_request`](ImClient::csr_request) - Request CSR for NOC
 //! - [`add_trusted_root_certificate`](ImClient::add_trusted_root_certificate) - Add trusted root CA
 //! - [`add_noc`](ImClient::add_noc) - Add Node Operational Certificate
+//! - [`update_noc`](ImClient::update_noc) - Update existing NOC (certificate rotation)
+//! - [`update_fabric_label`](ImClient::update_fabric_label) - Update fabric label
+//! - [`remove_fabric`](ImClient::remove_fabric) - Remove a fabric from the device
 
 use crate::error::{Error, ErrorCode};
 use crate::tlv::{Octets, TLVBuilderParent, TLVElement, TLVTag, TLVWriteParent};
@@ -71,6 +74,9 @@ pub use crate::dm::clusters::decl::operational_credentials::{
     CertificateChainTypeEnum,
     NOCResponse,
     NodeOperationalCertStatusEnum,
+    RemoveFabricRequestBuilder,
+    UpdateFabricLabelRequestBuilder,
+    UpdateNOCRequestBuilder,
 };
 
 /// General Commissioning cluster ID
@@ -89,6 +95,9 @@ const CMD_ATTESTATION_REQUEST: u32 = 0x00;
 const CMD_CERTIFICATE_CHAIN_REQUEST: u32 = 0x02;
 const CMD_CSR_REQUEST: u32 = 0x04;
 const CMD_ADD_NOC: u32 = 0x06;
+const CMD_UPDATE_NOC: u32 = 0x07;
+const CMD_UPDATE_FABRIC_LABEL: u32 = 0x09;
+const CMD_REMOVE_FABRIC: u32 = 0x0A;
 const CMD_ADD_TRUSTED_ROOT_CERTIFICATE: u32 = 0x0B;
 
 /// Extract the command response data from a CmdResp, returning an error if it's a status-only response.
@@ -466,6 +475,141 @@ impl ImClient {
             0, // endpoint 0
             OPERATIONAL_CREDENTIALS_CLUSTER,
             CMD_ADD_NOC,
+            cmd_data,
+            None,
+        )
+        .await?;
+
+        let data = extract_cmd_data(&resp)?;
+        Ok(NOCResponse::new(data))
+    }
+
+    /// Update an existing Node Operational Certificate.
+    ///
+    /// This command is used to update the NOC on an existing fabric,
+    /// typically for certificate rotation. The device must already be
+    /// commissioned on the fabric.
+    ///
+    /// # Arguments
+    /// - `exchange` - An established CASE session on the fabric to update
+    /// - `noc` - The new NOC in Matter TLV format
+    /// - `icac` - Optional new ICAC in Matter TLV format
+    ///
+    /// # Returns
+    /// The NOC response containing status and fabric index.
+    /// Use `.status_code()`, `.fabric_index()`, and `.debug_text()` to access fields.
+    pub async fn update_noc<'a>(
+        exchange: &'a mut Exchange<'_>,
+        noc: &[u8],
+        icac: Option<&[u8]>,
+    ) -> Result<NOCResponse<'a>, Error> {
+        let mut buf = [0u8; 1024]; // NOC + ICAC can be large
+        let tail = {
+            let wb = WriteBuf::new(&mut buf);
+            let parent = TLVWriteParent::new((), wb);
+
+            let mut parent = UpdateNOCRequestBuilder::new(parent, &TLVTag::Anonymous)?
+                .noc_value(Octets(noc))?
+                .icac_value(icac.map(Octets))?
+                .end()?;
+
+            parent.writer().get_tail()
+        };
+        let cmd_data = TLVElement::new(&buf[..tail]);
+
+        let resp = Self::invoke_single(
+            exchange,
+            0, // endpoint 0
+            OPERATIONAL_CREDENTIALS_CLUSTER,
+            CMD_UPDATE_NOC,
+            cmd_data,
+            None,
+        )
+        .await?;
+
+        let data = extract_cmd_data(&resp)?;
+        Ok(NOCResponse::new(data))
+    }
+
+    /// Update the label of an existing fabric.
+    ///
+    /// This command allows changing the user-visible label associated with
+    /// a fabric. The label must be unique among all fabrics on the device.
+    ///
+    /// # Arguments
+    /// - `exchange` - An established CASE session on the fabric to update
+    /// - `label` - The new label string (max 32 characters)
+    ///
+    /// # Returns
+    /// The NOC response containing status and fabric index.
+    /// Use `.status_code()`, `.fabric_index()`, and `.debug_text()` to access fields.
+    pub async fn update_fabric_label<'a>(
+        exchange: &'a mut Exchange<'_>,
+        label: &str,
+    ) -> Result<NOCResponse<'a>, Error> {
+        let mut buf = [0u8; 64];
+        let tail = {
+            let wb = WriteBuf::new(&mut buf);
+            let parent = TLVWriteParent::new((), wb);
+
+            let mut parent = UpdateFabricLabelRequestBuilder::new(parent, &TLVTag::Anonymous)?
+                .label(label)?
+                .end()?;
+
+            parent.writer().get_tail()
+        };
+        let cmd_data = TLVElement::new(&buf[..tail]);
+
+        let resp = Self::invoke_single(
+            exchange,
+            0, // endpoint 0
+            OPERATIONAL_CREDENTIALS_CLUSTER,
+            CMD_UPDATE_FABRIC_LABEL,
+            cmd_data,
+            None,
+        )
+        .await?;
+
+        let data = extract_cmd_data(&resp)?;
+        Ok(NOCResponse::new(data))
+    }
+
+    /// Remove a fabric from the device.
+    ///
+    /// This command removes all state associated with a fabric, including
+    /// the NOC, ICAC, root CA, ACL entries, and bindings. If the fabric
+    /// being removed is the one on which the command is sent, the session
+    /// will be terminated after the response.
+    ///
+    /// # Arguments
+    /// - `exchange` - An established CASE session with administrator privileges
+    /// - `fabric_index` - The index of the fabric to remove
+    ///
+    /// # Returns
+    /// The NOC response containing status and fabric index.
+    /// Use `.status_code()`, `.fabric_index()`, and `.debug_text()` to access fields.
+    pub async fn remove_fabric<'a>(
+        exchange: &'a mut Exchange<'_>,
+        fabric_index: u8,
+    ) -> Result<NOCResponse<'a>, Error> {
+        let mut buf = [0u8; 16];
+        let tail = {
+            let wb = WriteBuf::new(&mut buf);
+            let parent = TLVWriteParent::new((), wb);
+
+            let mut parent = RemoveFabricRequestBuilder::new(parent, &TLVTag::Anonymous)?
+                .fabric_index(fabric_index)?
+                .end()?;
+
+            parent.writer().get_tail()
+        };
+        let cmd_data = TLVElement::new(&buf[..tail]);
+
+        let resp = Self::invoke_single(
+            exchange,
+            0, // endpoint 0
+            OPERATIONAL_CREDENTIALS_CLUSTER,
+            CMD_REMOVE_FABRIC,
             cmd_data,
             None,
         )
