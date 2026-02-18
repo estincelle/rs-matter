@@ -26,20 +26,12 @@ use log::{Level, LevelFilter};
 
 use crate::commissioningtest::CommissioningTests;
 use crate::controllertest::ControllerTests;
-use crate::exchangetest::ExchangeTests;
-use crate::imtest::ImTests;
 use crate::itest::ITests;
-use crate::mdnstest::MdnsTests;
-use crate::pasetest::PaseTests;
 
 mod commissioningtest;
 mod common;
 mod controllertest;
-mod exchangetest;
-mod imtest;
 mod itest;
-mod mdnstest;
-mod pasetest;
 mod tlv;
 
 /// The main command-line interface for `xtask`.
@@ -126,100 +118,6 @@ enum Command {
         /// A comma-separated list of TLV octets to decode (e.g., "0x01,0x02,0x03" or "1,2,3")
         tlv: String,
     },
-    /// Test mDNS discovery against chip-all-clusters-app (calls `mdnstest-setup` as necessary)
-    Mdnstest {
-        #[command(flatten)]
-        setup_args: MdnstestSetupArgs,
-        #[command(flatten)]
-        run_args: MdnstestRunArgs,
-        /// Skip setting up of the environment (assume it's already set up)
-        #[arg(long)]
-        skip_setup: bool,
-    },
-    /// Setup environment for mDNS tests (builds chip-all-clusters-app)
-    MdnstestSetup(MdnstestSetupArgs),
-    /// Print mDNS test tooling information
-    MdnstestTools,
-    /// Print mDNS test packages information
-    MdnstestPackages,
-    /// Run exchange initiation test (starts a local device example by default)
-    Exchangetest {
-        /// Target device IP address
-        #[arg(long, default_value = "127.0.0.1")]
-        device_ip: String,
-        /// Target device port
-        #[arg(long, default_value_t = rs_matter::MATTER_PORT)]
-        device_port: u16,
-        /// Do not start a local device example (assume one is already running)
-        #[arg(long)]
-        no_start_device: bool,
-        /// Device example binary to run when starting a device locally
-        #[arg(long, default_value = "onoff_light")]
-        device_bin: String,
-        /// Cargo features to build examples with (applies to both device and exchange test)
-        #[arg(long)]
-        features: Vec<String>,
-        /// Build profile (debug or release)
-        #[arg(long, default_value = "debug")]
-        profile: String,
-        /// Wait time (ms) for the device to start when starting a device locally
-        #[arg(long, default_value_t = 2000)]
-        device_wait_ms: u64,
-    },
-    /// Run IM client integration test (PASE + read/invoke) against a device
-    Imtest {
-        /// Target device IP address
-        #[arg(long, default_value = "127.0.0.1")]
-        device_ip: String,
-        /// Target device port
-        #[arg(long, default_value_t = rs_matter::MATTER_PORT)]
-        device_port: u16,
-        /// Do not start a local device example (assume one is already running)
-        #[arg(long)]
-        no_start_device: bool,
-        /// Device example binary to run when starting a device locally
-        #[arg(long, default_value = "onoff_light")]
-        device_bin: String,
-        /// Cargo features to build examples with
-        #[arg(long)]
-        features: Vec<String>,
-        /// Build profile (debug or release)
-        #[arg(long, default_value = "debug")]
-        profile: String,
-        /// Wait time (ms) for the device to start when starting a device locally
-        #[arg(long, default_value_t = 2000)]
-        device_wait_ms: u64,
-        /// Device passcode for PASE authentication
-        #[arg(long, default_value_t = imtest::DEFAULT_PASSCODE)]
-        passcode: u32,
-    },
-    /// Run PASE (Passcode-Authenticated Session Establishment) integration test
-    Pasetest {
-        /// Target device IP address
-        #[arg(long, default_value = "127.0.0.1")]
-        device_ip: String,
-        /// Target device port
-        #[arg(long, default_value_t = rs_matter::MATTER_PORT)]
-        device_port: u16,
-        /// Do not start a local device example (assume one is already running)
-        #[arg(long)]
-        no_start_device: bool,
-        /// Device example binary to run when starting a device locally
-        #[arg(long, default_value = "onoff_light")]
-        device_bin: String,
-        /// Cargo features to build examples with
-        #[arg(long)]
-        features: Vec<String>,
-        /// Build profile (debug or release)
-        #[arg(long, default_value = "debug")]
-        profile: String,
-        /// Wait time (ms) for the device to start when starting a device locally
-        #[arg(long, default_value_t = 2000)]
-        device_wait_ms: u64,
-        /// Passcode to use for PASE authentication (default: 20202021)
-        #[arg(long, default_value_t = pasetest::DEFAULT_PASSCODE)]
-        passcode: u32,
-    },
     /// Run combined commissioning test (mDNS discovery + PASE + IM operations)
     ///
     /// This test exercises the complete flow: discovers a device via mDNS,
@@ -248,31 +146,6 @@ enum Command {
         #[arg(long, default_value_t = 30000)]
         discovery_timeout_ms: u32,
     },
-}
-
-/// Arguments for the `mdnstest-setup` command
-#[derive(Parser, Debug, Clone)]
-struct MdnstestSetupArgs {
-    /// connectedhomeip repository reference (branch/tag/commit)
-    #[arg(long, default_value = common::CHIP_DEFAULT_GITREF)]
-    chip_gitref: String,
-    /// Force setup even if cached
-    #[arg(long)]
-    force_setup: bool,
-}
-
-/// Arguments for the `mdnstest` run command
-#[derive(Parser, Debug, Clone)]
-struct MdnstestRunArgs {
-    /// Discriminator for the device (12-bit value)
-    #[arg(long, default_value_t = mdnstest::DEFAULT_DISCRIMINATOR)]
-    discriminator: u16,
-    /// Passcode for the device
-    #[arg(long, default_value_t = mdnstest::DEFAULT_PASSCODE)]
-    passcode: u32,
-    /// Discovery timeout in milliseconds
-    #[arg(long, default_value_t = mdnstest::DEFAULT_DISCOVERY_TIMEOUT_MS)]
-    timeout_ms: u32,
 }
 
 impl Command {
@@ -319,65 +192,6 @@ impl Command {
                 as_asn1,
                 tlv,
             } => tlv::decode(tlv, *dec, *cert, *as_asn1),
-            Command::MdnstestTools => {
-                MdnsTests::new(workspace_dir(), print_cmd_output).print_tooling()
-            }
-            Command::MdnstestPackages => {
-                MdnsTests::new(workspace_dir(), print_cmd_output).print_packages()
-            }
-            Command::MdnstestSetup(args) => MdnsTests::new(workspace_dir(), print_cmd_output)
-                .setup(Some(&args.chip_gitref), args.force_setup),
-            Command::Mdnstest {
-                setup_args,
-                run_args,
-                skip_setup,
-            } => {
-                if !*skip_setup {
-                    Command::MdnstestSetup(setup_args.clone()).run(print_cmd_output)?;
-                }
-
-                MdnsTests::new(workspace_dir(), print_cmd_output).run(
-                    run_args.discriminator,
-                    run_args.passcode,
-                    run_args.timeout_ms,
-                )
-            }
-            Command::Exchangetest {
-                device_ip,
-                device_port,
-                no_start_device,
-                device_bin,
-                features,
-                profile,
-                device_wait_ms,
-            } => ExchangeTests::new(workspace_dir(), print_cmd_output).run(
-                device_ip,
-                *device_port,
-                !*no_start_device,
-                device_bin,
-                features,
-                profile,
-                *device_wait_ms,
-            ),
-            Command::Imtest {
-                device_ip,
-                device_port,
-                no_start_device,
-                device_bin,
-                features,
-                profile,
-                device_wait_ms,
-                passcode,
-            } => ImTests::new(workspace_dir(), print_cmd_output).run(
-                device_ip,
-                *device_port,
-                !*no_start_device,
-                device_bin,
-                features,
-                profile,
-                *device_wait_ms,
-                *passcode,
-            ),
             Command::ControllertestTools => {
                 ControllerTests::new(workspace_dir(), print_cmd_output).print_tooling()
             }
@@ -411,25 +225,6 @@ impl Command {
 
                 ControllerTests::new(workspace_dir(), print_cmd_output).run(tests, *timeout)
             }
-            Command::Pasetest {
-                device_ip,
-                device_port,
-                no_start_device,
-                device_bin,
-                features,
-                profile,
-                device_wait_ms,
-                passcode,
-            } => PaseTests::new(workspace_dir(), print_cmd_output).run(
-                device_ip,
-                *device_port,
-                !*no_start_device,
-                device_bin,
-                features,
-                profile,
-                *device_wait_ms,
-                *passcode,
-            ),
             Command::Commissioningtest {
                 device_bin,
                 features,
