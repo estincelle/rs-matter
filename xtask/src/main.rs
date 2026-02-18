@@ -24,6 +24,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use env_logger::fmt::style;
 use log::{Level, LevelFilter};
 
+use crate::commissioningtest::CommissioningTests;
 use crate::controllertest::ControllerTests;
 use crate::exchangetest::ExchangeTests;
 use crate::imtest::ImTests;
@@ -31,6 +32,7 @@ use crate::itest::ITests;
 use crate::mdnstest::MdnsTests;
 use crate::pasetest::PaseTests;
 
+mod commissioningtest;
 mod controllertest;
 mod exchangetest;
 mod imtest;
@@ -217,6 +219,34 @@ enum Command {
         #[arg(long, default_value_t = pasetest::DEFAULT_PASSCODE)]
         passcode: u32,
     },
+    /// Run combined commissioning test (mDNS discovery + PASE + IM operations)
+    ///
+    /// This test exercises the complete flow: discovers a device via mDNS,
+    /// establishes a PASE session, and performs IM operations (read/invoke)
+    /// on the OnOff cluster.
+    Commissioningtest {
+        /// Device example binary to run
+        #[arg(long, default_value = "onoff_light")]
+        device_bin: String,
+        /// Cargo features to build examples with
+        #[arg(long)]
+        features: Vec<String>,
+        /// Build profile (debug or release)
+        #[arg(long, default_value = "debug")]
+        profile: String,
+        /// Wait time (ms) for the device to start (needs time for mDNS to initialize)
+        #[arg(long, default_value_t = 5000)]
+        device_wait_ms: u64,
+        /// Passcode for PASE authentication
+        #[arg(long, default_value_t = commissioningtest::DEFAULT_PASSCODE)]
+        passcode: u32,
+        /// Discriminator for mDNS discovery
+        #[arg(long, default_value_t = commissioningtest::DEFAULT_DISCRIMINATOR)]
+        discriminator: u16,
+        /// Discovery timeout in milliseconds
+        #[arg(long, default_value_t = 30000)]
+        discovery_timeout_ms: u32,
+    },
 }
 
 /// Arguments for the `mdnstest-setup` command
@@ -398,6 +428,23 @@ impl Command {
                 profile,
                 *device_wait_ms,
                 *passcode,
+            ),
+            Command::Commissioningtest {
+                device_bin,
+                features,
+                profile,
+                device_wait_ms,
+                passcode,
+                discriminator,
+                discovery_timeout_ms,
+            } => CommissioningTests::new(workspace_dir(), print_cmd_output).run(
+                device_bin,
+                features,
+                profile,
+                *device_wait_ms,
+                *passcode,
+                *discriminator,
+                *discovery_timeout_ms,
             ),
         }
     }
