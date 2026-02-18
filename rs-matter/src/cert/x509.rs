@@ -48,16 +48,19 @@ const TAG_CONTEXT_3: u8 = 0xA3;
 // Context specific tag for AuthorityKeyIdentifier
 const TAG_CONTEXT_0_PRIM: u8 = 0x80;
 
-// TBS certificate field to indices
-#[allow(dead_code)]
-const TBS_FIELD_VERSION: usize = 0;
-const TBS_FIELD_SERIAL_NUM: usize = 1;
-const TBS_FIELD_SIGNATURE: usize = 2;
-const TBS_FIELD_ISSUER: usize = 3;
-const TBS_FIELD_VALIDITY: usize = 4;
-const TBS_FIELD_SUBJECT: usize = 5;
-const TBS_FIELD_SUBJECT_PUBKEY_INFO: usize = 6;
-const TBS_FIELD_EXTENSIONS: usize = 7;
+// TBS certificate fields
+#[allow(unused)]
+#[repr(usize)]
+enum TbsField {
+    Version,
+    SerialNum,
+    Signature,
+    Issuer,
+    Validity,
+    Subject,
+    SubjectPubKeyInfo,
+    Extensions,
+}
 
 // X.509 extension OIDs
 const OID_SUBJECT_KEY_ID: [u8; 3] = [0x55, 0x1D, 0x0E]; // OID 2.5.29.14
@@ -321,19 +324,10 @@ impl<'a> X509CertRef<'a> {
 
     /// Navigate to a specific field of tbsCertificate by semantic index.
     ///
-    /// The `index` parameter uses the TBS_FIELD_* constants (0-7), representing
-    /// field types (version, serialNumber, etc.), not raw positions. This function
-    /// accounts for the optional [0] EXPLICIT version tag:
-    /// - If index is VERSION (0): returns error if version not present
-    /// - Otherwise: adjusts position based on version presence
-    ///
-    /// Valid indices: 0 (version) through 7 (extensions)
+    /// If version field is requested, but not present, an error is returned.
     ///
     /// https://www.rfc-editor.org/rfc/rfc5280#section-4.1
-    fn tbs_field(&self, index: usize) -> Result<DerReader<'a>, Error> {
-        if index > TBS_FIELD_EXTENSIONS {
-            return Err(ErrorCode::InvalidData.into());
-        }
+    fn tbs_field(&self, field: TbsField) -> Result<DerReader<'a>, Error> {
         let mut reader = self.tbs_certificate()?;
 
         // Check if the first element is the [0] EXPLICIT version tag
@@ -342,7 +336,7 @@ impl<'a> X509CertRef<'a> {
 
         // If index 0 is requested and version is present, return it directly
         // or return error because requested field is not present
-        if index == 0 {
+        if matches!(field, TbsField::Version) {
             if has_version {
                 return Ok(reader);
             } else {
@@ -353,6 +347,7 @@ impl<'a> X509CertRef<'a> {
         // Skip elements to reach the desired index
         // If version is present, we start counting from 0 (version)
         // If version is absent, field index 1 (serialNumber) is at position 0
+        let index = field as usize;
         let skip_count = if has_version { index } else { index - 1 };
 
         for _ in 0..skip_count {
@@ -463,7 +458,7 @@ impl<'a> X509CertRef<'a> {
     fn find_subject_attr(&self, oid: &[u8]) -> Result<Option<&'a [u8]>, Error> {
         // Navigate to Subject DN (field index 5 in tbsCertificate)
         // https://www.rfc-editor.org/rfc/rfc5280#section-4.1
-        let field_reader = self.tbs_field(TBS_FIELD_SUBJECT)?;
+        let field_reader = self.tbs_field(TbsField::Subject)?;
         let (tag, subject_value, _) = field_reader.read_tlv()?;
         if tag != TAG_SEQUENCE {
             return Err(ErrorCode::InvalidData.into());
@@ -569,7 +564,7 @@ impl<'a> X509CertRef<'a> {
     /// BIT STRING unused-bits byte is not 0x00.
     pub fn public_key(&self) -> Result<&'a [u8], Error> {
         // Navigate to subjectPublicKeyInfo (field 6)
-        let field_reader = self.tbs_field(TBS_FIELD_SUBJECT_PUBKEY_INFO)?;
+        let field_reader = self.tbs_field(TbsField::SubjectPubKeyInfo)?;
         let (tag, spki_value, _) = field_reader.read_tlv()?;
         if tag != TAG_SEQUENCE {
             return Err(ErrorCode::InvalidData.into());
@@ -635,7 +630,7 @@ impl<'a> X509CertRef<'a> {
     /// Parses UTCTime ("YYMMDDHHMMSSZ") or GeneralizedTime ("YYYYMMDDHHMMSSZ")
     /// from the validity field of the tbsCertificate.
     pub fn not_before_unix(&self) -> Result<u64, Error> {
-        let field_reader = self.tbs_field(TBS_FIELD_VALIDITY)?;
+        let field_reader = self.tbs_field(TbsField::Validity)?;
         let (tag, validity_value, _) = field_reader.read_tlv()?;
         if tag != TAG_SEQUENCE {
             return Err(ErrorCode::InvalidData.into());
@@ -651,7 +646,7 @@ impl<'a> X509CertRef<'a> {
     /// Parses UTCTime or GeneralizedTime. For GeneralizedTime
     /// "99991231235959Z", returns `u64::MAX` to indicate no expiry.
     pub fn not_after_unix(&self) -> Result<u64, Error> {
-        let field_reader = self.tbs_field(TBS_FIELD_VALIDITY)?;
+        let field_reader = self.tbs_field(TbsField::Validity)?;
         let (tag, validity_value, _) = field_reader.read_tlv()?;
         if tag != TAG_SEQUENCE {
             return Err(ErrorCode::InvalidData.into());
@@ -988,15 +983,8 @@ mod tests {
         der.drain(version_start..version_start + version_field_len);
 
         let cert = X509CertRef::new(&der).unwrap();
-        assert!(cert.tbs_field(TBS_FIELD_VERSION).is_err());
-        assert!(cert.tbs_field(TBS_FIELD_SERIAL_NUM).is_ok());
-    }
-
-    #[test]
-    fn test_tbs_field_out_of_bounds() {
-        let cert = X509CertRef::new(PAA_DER).unwrap();
-        assert!(cert.tbs_field(8).is_err());
-        assert!(cert.tbs_field(100).is_err());
+        assert!(cert.tbs_field(TbsField::Version).is_err());
+        assert!(cert.tbs_field(TbsField::SerialNum).is_ok());
     }
 
     #[test]
