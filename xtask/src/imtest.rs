@@ -165,12 +165,7 @@ impl ImTests {
             .with_context(|| format!("Failed to start device example: {}", exe.display()))
     }
 
-    fn run_im_test(
-        &self,
-        device_ip: &str,
-        device_port: u16,
-        passcode: u32,
-    ) -> anyhow::Result<()> {
+    fn run_im_test(&self, device_ip: &str, device_port: u16, passcode: u32) -> anyhow::Result<()> {
         warn!("Running IM client integration test...");
         info!("Device: {}:{}", device_ip, device_port);
         info!("Passcode: {}", passcode);
@@ -186,10 +181,7 @@ impl ImTests {
     }
 
     fn examples_exe_path(&self, bin: &str, profile: &str) -> PathBuf {
-        self.workspace_dir
-            .join("target")
-            .join(profile)
-            .join(bin)
+        self.workspace_dir.join("target").join(profile).join(bin)
     }
 
     fn run_command(&self, cmd: &mut Command) -> anyhow::Result<()> {
@@ -308,12 +300,7 @@ fn run_im_test_internal(device_ip: &str, port: u16, passcode: u32) -> Result<(),
     );
 
     // Bind UDP socket on an ephemeral port
-    let bind_addr = SocketAddr::V6(SocketAddrV6::new(
-        std::net::Ipv6Addr::UNSPECIFIED,
-        0,
-        0,
-        0,
-    ));
+    let bind_addr = SocketAddr::V6(SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0));
     let socket = async_io::Async::<UdpSocket>::bind(bind_addr)?;
 
     info!(
