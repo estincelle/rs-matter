@@ -3,9 +3,9 @@ name: PAA Trust Store Test
 
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
-    branches: [main]
+    branches: [main, development]
   schedule:
     # Run every night at 6:00 AM UTC (offset from other tests)
     - cron: "0 6 * * *"
