@@ -29,6 +29,7 @@ use crate::exchangetest::ExchangeTests;
 use crate::itest::ITests;
 use crate::mdnstest::MdnsTests;
 use crate::pasetest::PaseTests;
+use crate::truststoretest::TrustStoreTests;
 
 mod controllertest;
 mod exchangetest;
@@ -36,6 +37,7 @@ mod itest;
 mod mdnstest;
 mod pasetest;
 mod tlv;
+mod truststoretest;
 
 /// The main command-line interface for `xtask`.
 #[derive(Parser)]
@@ -187,6 +189,18 @@ enum Command {
         /// Passcode to use for PASE authentication (default: 20202021)
         #[arg(long, default_value_t = pasetest::DEFAULT_PASSCODE)]
         passcode: u32,
+    },
+    /// Run PAA Trust Store test (fetches real PAA certs from connectedhomeip repo)
+    Truststoretest {
+        /// Git reference (branch/tag) to fetch PAA certs from
+        #[arg(long, default_value = truststoretest::CHIP_DEFAULT_GITREF)]
+        gitref: String,
+        /// Path to a local directory containing PAA .der files (skips fetch)
+        #[arg(long)]
+        paa_path: Option<PathBuf>,
+        /// Skip fetching PAA certs (use previously cached certs)
+        #[arg(long)]
+        skip_fetch: bool,
     },
 }
 
@@ -350,6 +364,15 @@ impl Command {
                 profile,
                 *device_wait_ms,
                 *passcode,
+            ),
+            Command::Truststoretest {
+                gitref,
+                paa_path,
+                skip_fetch,
+            } => TrustStoreTests::new(workspace_dir(), print_cmd_output).run(
+                gitref,
+                paa_path.as_deref(),
+                *skip_fetch,
             ),
         }
     }
