@@ -79,15 +79,16 @@ const P256_PUBLIC_KEY_LEN: usize = 65;
 
 /// DER reader that operates on a borrowed byte slice.
 ///
-/// Navigates the hierarchical structure of a DER-encoded X.509 certificate.
+/// Navigates the hierarchical structure of DER-encoded ASN.1 data.
+/// Used for parsing X.509 certificates and CMS/PKCS#7 structures.
 #[derive(Clone, Copy)]
-struct DerReader<'a> {
+pub(crate) struct DerReader<'a> {
     data: &'a [u8],
 }
 
 impl<'a> DerReader<'a> {
     /// Create a new DerReader from a byte slice.
-    fn new(data: &'a [u8]) -> Self {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
         Self { data }
     }
 
@@ -99,7 +100,7 @@ impl<'a> DerReader<'a> {
     /// - Short form: single byte < 128
     /// - Long form 0x81: next 1 byte is the length
     /// - Long form 0x82: next 2 bytes are the length (big-endian)
-    fn read_length(data: &'a [u8]) -> Result<(usize, &'a [u8]), Error> {
+    pub(crate) fn read_length(data: &'a [u8]) -> Result<(usize, &'a [u8]), Error> {
         if data.is_empty() {
             return Err(ErrorCode::InvalidData.into());
         }
@@ -131,7 +132,7 @@ impl<'a> DerReader<'a> {
     /// Read a complete TLV (tag, length, value) from the current position.
     ///
     /// Returns `(tag, value_bytes, rest_after_this_tlv)`.
-    fn read_tlv(&self) -> Result<(u8, &'a [u8], &'a [u8]), Error> {
+    pub(crate) fn read_tlv(&self) -> Result<(u8, &'a [u8], &'a [u8]), Error> {
         if self.data.is_empty() {
             return Err(ErrorCode::InvalidData.into());
         }
@@ -151,19 +152,19 @@ impl<'a> DerReader<'a> {
     /// Enter a constructed type (SEQUENCE, SET, etc.).
     ///
     /// Returns `(tag, inner_reader_over_value_bytes, rest_after_this_tlv)`.
-    fn enter(&self) -> Result<(u8, DerReader<'a>, &'a [u8]), Error> {
+    pub(crate) fn enter(&self) -> Result<(u8, DerReader<'a>, &'a [u8]), Error> {
         let (tag, value, rest) = self.read_tlv()?;
         Ok((tag, DerReader::new(value), rest))
     }
 
     /// Skip the current TLV and return a reader positioned at the next element.
-    fn skip(&self) -> Result<DerReader<'a>, Error> {
+    pub(crate) fn skip(&self) -> Result<DerReader<'a>, Error> {
         let (_, _, rest) = self.read_tlv()?;
         Ok(DerReader::new(rest))
     }
 
     /// Check if all bytes have been consumed.
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 }
