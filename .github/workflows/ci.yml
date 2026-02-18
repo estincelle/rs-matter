@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main, development]
   pull_request:
-    branches: [ main ]
+    branches: [main, development]
   schedule:
     - cron: "50 6 * * *"
   workflow_dispatch:
@@ -19,8 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        crypto-backend: ['rustcrypto', 'mbedtls', 'openssl']
-        features: ['', 'alloc', 'os']
+        crypto-backend: ["rustcrypto", "mbedtls", "openssl"]
+        features: ["", "alloc", "os"]
 
     steps:
       - name: Rust
