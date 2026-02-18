@@ -134,9 +134,7 @@ impl ExchangeTests {
         warn!("Building examples: {}", bins.join(", "));
 
         let mut cmd = Command::new("cargo");
-        cmd.arg("build")
-            .arg("-p")
-            .arg("rs-matter-examples");
+        cmd.arg("build").arg("-p").arg("rs-matter-examples");
 
         for bin in bins {
             cmd.arg("--bin").arg(bin);
@@ -186,10 +184,7 @@ impl ExchangeTests {
     }
 
     fn examples_exe_path(&self, bin: &str, profile: &str) -> PathBuf {
-        self.workspace_dir
-            .join("target")
-            .join(profile)
-            .join(bin)
+        self.workspace_dir.join("target").join(profile).join(bin)
     }
 
     fn run_command(&self, cmd: &mut Command) -> anyhow::Result<()> {
@@ -274,12 +269,7 @@ fn run_exchange_test_internal(device_ip: &str, port: u16) -> Result<(), Error> {
     );
 
     // Bind UDP socket on an ephemeral port
-    let bind_addr = SocketAddr::V6(SocketAddrV6::new(
-        std::net::Ipv6Addr::UNSPECIFIED,
-        0,
-        0,
-        0,
-    ));
+    let bind_addr = SocketAddr::V6(SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0));
     let socket = async_io::Async::<UdpSocket>::bind(bind_addr)?;
 
     info!(
