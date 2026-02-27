@@ -70,8 +70,14 @@ fn test_client_read_non_chunked() {
             })
             .await?;
 
-            assert_eq!(chunk_count, 1, "Non-chunked read should have exactly 1 chunk");
-            assert_eq!(attr_count, 1, "Should have received exactly 1 attribute report");
+            assert_eq!(
+                chunk_count, 1,
+                "Non-chunked read should have exactly 1 chunk"
+            );
+            assert_eq!(
+                attr_count, 1,
+                "Should have received exactly 1 attribute report"
+            );
 
             exchange.acknowledge().await?;
 

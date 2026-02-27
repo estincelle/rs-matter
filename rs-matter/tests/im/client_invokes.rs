@@ -73,7 +73,10 @@ fn test_client_invoke_non_chunked() {
             })
             .await?;
 
-            assert_eq!(chunk_count, 1, "Non-chunked invoke should have exactly 1 chunk");
+            assert_eq!(
+                chunk_count, 1,
+                "Non-chunked invoke should have exactly 1 chunk"
+            );
             assert!(got_response, "Should have received an invoke response");
 
             exchange.acknowledge().await?;
