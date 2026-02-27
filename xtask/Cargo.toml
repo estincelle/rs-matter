@@ -21,6 +21,7 @@ rand = { version = "0.8", features = ["std", "std_rng"] }
 static_cell = "1"
 socket2 = { version = "0.5", features = ["all"] }
 nix = { version = "0.30", features = ["net"] }
+heapless = "0.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 rs-matter = { path = "../rs-matter", default-features = false, features = ["rustcrypto", "os", "async-io", "log", "astro-dnssd"] }
