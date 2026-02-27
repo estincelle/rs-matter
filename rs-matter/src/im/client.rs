@@ -234,21 +234,31 @@ impl ImClient {
 
     /// Invoke a command on a device.
     ///
-    /// Sends an InvokeRequest and returns the InvokeResponse containing
-    /// the command results.
+    /// Sends an InvokeRequest and processes the InvokeResponse(s). If the
+    /// server's response is too large for a single message, it will be sent
+    /// across multiple chunks with the `more_chunks` flag set. This method
+    /// handles the chunking protocol automatically, invoking the callback
+    /// once per chunk.
+    ///
+    /// The callback receives a reference to each chunk's `InvokeResp`.
+    /// Because the exchange's rx buffer is invalidated when sending the
+    /// `StatusResponse` to request the next chunk, callers must extract any
+    /// needed data from the response within the callback.
     ///
     /// # Arguments
     /// - `exchange` - An established exchange (PASE or CASE session)
     /// - `cmd_data` - Command data to invoke
     /// - `timed_timeout_ms` - Optional timeout for timed invoke (required for some commands)
-    ///
-    /// # Returns
-    /// The parsed InvokeResponse, or an error if the request failed.
-    pub async fn invoke<'a>(
-        exchange: &'a mut Exchange<'_>,
+    /// - `on_response` - Callback invoked for each InvokeResponse chunk
+    pub async fn invoke<F>(
+        exchange: &mut Exchange<'_>,
         cmd_data: &[CmdData<'_>],
         timed_timeout_ms: Option<u16>,
-    ) -> Result<InvokeResp<'a>, Error> {
+        mut on_response: F,
+    ) -> Result<(), Error>
+    where
+        F: FnMut(&InvokeResp<'_>) -> Result<(), Error>,
+    {
         debug!(
             "ImClient::invoke - Starting invoke on exchange {}",
             exchange.id()
@@ -262,34 +272,59 @@ impl ImClient {
         let req = InvokeRequestBuilder::new(cmd_data, timed_timeout_ms.is_some());
 
         // Send InvokeRequest
-        debug!("ImClient::invoke - Sending InvokeRequest");
         exchange
             .send_with(|_, wb| {
                 req.to_tlv(&TagType::Anonymous, wb)?;
                 Ok(Some(OpCode::InvokeRequest.into()))
             })
             .await?;
-        debug!("ImClient::invoke - InvokeRequest sent, waiting for response");
 
-        // Receive InvokeResponse
-        exchange.recv_fetch().await?;
-        debug!("ImClient::invoke - Received response");
+        loop {
+            // Receive InvokeResponse
+            exchange.recv_fetch().await?;
 
-        // Check opcode before acknowledging
-        {
-            let rx = exchange.rx()?;
-            Self::check_opcode(rx.meta().proto_opcode, OpCode::InvokeResponse)?;
+            let (more_chunks, suppress_response) = {
+                let rx = exchange.rx()?;
+                Self::check_opcode(rx.meta().proto_opcode, OpCode::InvokeResponse)?;
+
+                let element = TLVElement::new(rx.payload());
+                let resp = InvokeResp::from_tlv(&element)?;
+
+                let more = resp.more_chunks.unwrap_or(false);
+                let suppress = resp.suppress_response.unwrap_or(false);
+
+                // Invoke callback while the rx buffer is still valid
+                on_response(&resp)?;
+
+                (more, suppress)
+            };
+
+            if more_chunks {
+                // Spec forbids suppress_response=true with more_chunks=true
+                if suppress_response {
+                    return Err(ErrorCode::InvalidData.into());
+                }
+
+                // Send StatusResponse to request the next chunk.
+                // This clears the rx buffer.
+                debug!("ImClient::invoke - more_chunks=true, sending StatusResponse for next chunk");
+                exchange
+                    .send_with(|_, wb| {
+                        StatusResp::write(wb, IMStatusCode::Success)?;
+                        Ok(Some(OpCode::StatusResponse.into()))
+                    })
+                    .await?;
+            } else {
+                // Final chunk — send standalone ACK for MRP completion.
+                // Unlike ReportData, InvokeResponse does not use StatusResponse
+                // on the final chunk; the client just ACKs and closes.
+                debug!("ImClient::invoke - final chunk, sending standalone ACK");
+                exchange.acknowledge().await?;
+                break;
+            }
         }
 
-        // Send ACK for the InvokeResponse so there's no pending ACK when the exchange is dropped.
-        // This prevents race conditions with subsequent exchanges.
-        exchange.acknowledge().await?;
-
-        // Parse response (rx buffer is still valid after acknowledge)
-        let rx = exchange.rx()?;
-        let resp = InvokeResp::from_tlv(&TLVElement::new(rx.payload()))?;
-
-        Ok(resp)
+        Ok(())
     }
 
     /// Write attributes to a device.
@@ -451,18 +486,25 @@ impl ImClient {
     /// Invoke a single command on a device.
     ///
     /// This is a convenience method that wraps `invoke()` for the common case
-    /// of invoking a single command.
+    /// of invoking a single command. The callback receives the first
+    /// `CmdResp` found across all chunks and should extract the needed
+    /// data from it.
     ///
     /// # Returns
-    /// The first command response, or an error if none was returned.
-    pub async fn invoke_single<'a>(
-        exchange: &'a mut Exchange<'_>,
+    /// The value returned by the callback, or an error if no command
+    /// response was found or the invoke failed.
+    pub async fn invoke_single<T, F>(
+        exchange: &mut Exchange<'_>,
         endpoint: EndptId,
         cluster: ClusterId,
         cmd: u32,
         cmd_data: TLVElement<'_>,
         timed_timeout_ms: Option<u16>,
-    ) -> Result<CmdResp<'a>, Error> {
+        on_resp: F,
+    ) -> Result<T, Error>
+    where
+        F: FnOnce(&CmdResp<'_>) -> Result<T, Error>,
+    {
         let path = CmdPath {
             endpoint: Some(endpoint),
             cluster: Some(cluster),
@@ -474,15 +516,29 @@ impl ImClient {
             data: cmd_data,
         };
 
-        let resp = Self::invoke(exchange, &[data], timed_timeout_ms).await?;
+        let mut result: Option<Result<T, Error>> = None;
+        let mut on_resp = Some(on_resp);
 
-        // Extract the first invoke response
-        let invoke_responses = resp.invoke_responses.ok_or(ErrorCode::InvalidData)?;
-        invoke_responses
-            .iter()
-            .next()
-            .ok_or(ErrorCode::InvalidData)?
-            .map_err(|_| ErrorCode::InvalidData.into())
+        Self::invoke(exchange, &[data], timed_timeout_ms, |resp| {
+            if result.is_none() {
+                if let Some(invoke_responses) = &resp.invoke_responses {
+                    if let Some(cmd_resp) = invoke_responses.iter().next() {
+                        if let Some(cb) = on_resp.take() {
+                            match cmd_resp {
+                                Ok(resp) => result = Some(cb(&resp)),
+                                Err(_) => {
+                                    result = Some(Err(ErrorCode::InvalidData.into()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await?;
+
+        result.unwrap_or(Err(ErrorCode::InvalidData.into()))
     }
 }
 
