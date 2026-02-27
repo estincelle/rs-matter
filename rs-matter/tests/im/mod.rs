@@ -15,4 +15,5 @@
  *    limitations under the License.
  */
 
+mod client_invokes;
 mod client_reads;
