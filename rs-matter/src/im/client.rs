@@ -182,15 +182,7 @@ impl ImClient {
         debug!("ImClient::read - ReadRequest sent successfully, now waiting for ReportData...");
 
         // Receive ReportData
-        let recv_result = exchange.recv_fetch().await;
-
-        debug!(
-            "ImClient::read - recv_fetch completed with: {:?}",
-            recv_result.as_ref().map(|_| "Ok")
-        );
-
-        recv_result?;
-
+        exchange.recv_fetch().await?;
         debug!("ImClient::read - Received response successfully");
 
         // Check opcode and extract suppress_response flag before borrowing payload
