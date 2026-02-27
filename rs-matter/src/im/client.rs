@@ -131,96 +131,105 @@ impl<'a> InvokeRequestBuilder<'a> {
 ///     attr: Some(0x0000),    // OnOff attribute
 ///     ..Default::default()
 /// };
-/// let report = ImClient::read(exchange, &[attr_path], true).await?;
+/// ImClient::read(exchange, &[attr_path], true, |report| {
+///     // Process each chunk's attribute reports here
+///     Ok(())
+/// }).await?;
 /// ```
 pub struct ImClient;
 
 impl ImClient {
     /// Read attributes from a device.
     ///
-    /// Sends a ReadRequest and returns the ReportData response containing
-    /// the requested attribute values.
+    /// Sends a ReadRequest and processes the ReportData response(s). If the
+    /// server's response is too large for a single message, it will be sent
+    /// across multiple chunks with the `more_chunks` flag set. This method
+    /// handles the chunking protocol automatically, invoking the callback
+    /// once per chunk.
+    ///
+    /// The callback receives a reference to each chunk's `ReportDataResp`.
+    /// Because the exchange's rx buffer is invalidated when sending the
+    /// `StatusResponse` to request the next chunk, callers must extract any
+    /// needed data from the response within the callback.
     ///
     /// # Arguments
     /// - `exchange` - An established exchange (PASE or CASE session)
     /// - `attr_paths` - Attribute paths to read
     /// - `fabric_filtered` - Whether to filter results by fabric
-    ///
-    /// # Returns
-    /// The parsed ReportData response, or an error if the request failed.
-    pub async fn read<'a>(
-        exchange: &'a mut Exchange<'_>,
+    /// - `on_report` - Callback invoked for each ReportData chunk
+    pub async fn read<F>(
+        exchange: &mut Exchange<'_>,
         attr_paths: &[AttrPath],
         fabric_filtered: bool,
-    ) -> Result<ReportDataResp<'a>, Error> {
+        mut on_report: F,
+    ) -> Result<(), Error>
+    where
+        F: FnMut(&ReportDataResp<'_>) -> Result<(), Error>,
+    {
         let req = ReadRequestBuilder::attributes(attr_paths, fabric_filtered);
 
         debug!(
             "ImClient::read - Sending ReadRequest on exchange {}",
             exchange.id()
         );
-        trace!(
-            "ReadRequest: attr_paths={:?}, fabric_filtered={}",
-            attr_paths,
-            fabric_filtered
-        );
 
         // Send ReadRequest
-        debug!("ImClient::read - About to call send_with");
-        let send_result = exchange
+        exchange
             .send_with(|_, wb| {
                 req.to_tlv(&TagType::Anonymous, wb)?;
                 Ok(Some(OpCode::ReadRequest.into()))
             })
-            .await;
-        debug!(
-            "ImClient::read - send_with completed with: {:?}",
-            send_result.as_ref().map(|_| "Ok")
-        );
-        send_result?;
+            .await?;
 
-        debug!("ImClient::read - ReadRequest sent successfully, now waiting for ReportData...");
+        loop {
+            // Receive ReportData
+            exchange.recv_fetch().await?;
 
-        // Receive ReportData
-        exchange.recv_fetch().await?;
-        debug!("ImClient::read - Received response successfully");
+            let (more_chunks, suppress_response) = {
+                let rx = exchange.rx()?;
+                Self::check_opcode(rx.meta().proto_opcode, OpCode::ReportData)?;
 
-        // Check opcode and extract suppress_response flag before borrowing payload
-        let suppress_response = {
-            let rx = exchange.rx()?;
-            Self::check_opcode(rx.meta().proto_opcode, OpCode::ReportData)?;
+                let element = TLVElement::new(rx.payload());
+                let resp = ReportDataResp::from_tlv(&element)?;
 
-            // Quick check for suppress_response flag (parse TLV to extract it)
-            let element = TLVElement::new(rx.payload());
-            let resp = ReportDataResp::from_tlv(&element)?;
-            resp.suppress_response.unwrap_or(false)
-        };
+                let more = resp.more_chunks.unwrap_or(false);
+                let suppress = resp.suppress_response.unwrap_or(false);
 
-        debug!("ImClient::read - suppress_response={}", suppress_response);
+                // Invoke callback while the rx buffer is still valid
+                on_report(&resp)?;
 
-        // Send StatusResponse if not suppressed
-        if !suppress_response {
-            debug!("ImClient::read - Sending StatusResponse");
-            exchange
-                .send_with(|_, wb| {
-                    StatusResp::write(wb, IMStatusCode::Success)?;
-                    Ok(Some(OpCode::StatusResponse.into()))
-                })
-                .await?;
-            debug!("ImClient::read - StatusResponse sent");
-        } else {
-            // If suppress_response is true, we still need to send an ACK for the ReportData
-            // so that when the exchange is dropped, there's no pending ACK that could
-            // cause race conditions with subsequent exchanges.
-            debug!("ImClient::read - Sending standalone ACK");
-            exchange.acknowledge().await?;
+                (more, suppress)
+            };
+
+            if more_chunks {
+                // Send StatusResponse to request the next chunk.
+                // This clears the rx buffer.
+                debug!("ImClient::read - more_chunks=true, sending StatusResponse for next chunk");
+                exchange
+                    .send_with(|_, wb| {
+                        StatusResp::write(wb, IMStatusCode::Success)?;
+                        Ok(Some(OpCode::StatusResponse.into()))
+                    })
+                    .await?;
+            } else {
+                // Final chunk
+                if !suppress_response {
+                    debug!("ImClient::read - final chunk, sending StatusResponse");
+                    exchange
+                        .send_with(|_, wb| {
+                            StatusResp::write(wb, IMStatusCode::Success)?;
+                            Ok(Some(OpCode::StatusResponse.into()))
+                        })
+                        .await?;
+                } else {
+                    debug!("ImClient::read - final chunk, sending standalone ACK");
+                    exchange.acknowledge().await?;
+                }
+                break;
+            }
         }
 
-        // Re-parse the response for return (the rx buffer is still valid)
-        let rx = exchange.rx()?;
-        let resp = ReportDataResp::from_tlv(&TLVElement::new(rx.payload()))?;
-
-        Ok(resp)
+        Ok(())
     }
 
     /// Invoke a command on a device.
@@ -389,17 +398,24 @@ impl ImClient {
     /// Read a single attribute from a device.
     ///
     /// This is a convenience method that wraps `read()` for the common case
-    /// of reading a single attribute.
+    /// of reading a single attribute. The callback receives the first
+    /// `AttrResp` found across all chunks and should extract the needed
+    /// data from it.
     ///
     /// # Returns
-    /// The first attribute response, or an error if none was returned.
-    pub async fn read_single<'a>(
-        exchange: &'a mut Exchange<'_>,
+    /// The value returned by the callback, or an error if no attribute
+    /// response was found or the read failed.
+    pub async fn read_single<T, F>(
+        exchange: &mut Exchange<'_>,
         endpoint: EndptId,
         cluster: ClusterId,
         attr: AttrId,
         fabric_filtered: bool,
-    ) -> Result<AttrResp<'a>, Error> {
+        on_attr: F,
+    ) -> Result<T, Error>
+    where
+        F: FnOnce(&AttrResp<'_>) -> Result<T, Error>,
+    {
         let path = AttrPath {
             endpoint: Some(endpoint),
             cluster: Some(cluster),
@@ -407,15 +423,29 @@ impl ImClient {
             ..Default::default()
         };
 
-        let report = Self::read(exchange, &[path], fabric_filtered).await?;
+        let mut result: Option<Result<T, Error>> = None;
+        let mut on_attr = Some(on_attr);
 
-        // Extract the first attribute report
-        let attr_reports = report.attr_reports.ok_or(ErrorCode::InvalidData)?;
-        attr_reports
-            .iter()
-            .next()
-            .ok_or(ErrorCode::InvalidData)?
-            .map_err(|_| ErrorCode::InvalidData.into())
+        Self::read(exchange, &[path], fabric_filtered, |report| {
+            if result.is_none() {
+                if let Some(attr_reports) = &report.attr_reports {
+                    if let Some(attr_resp) = attr_reports.iter().next() {
+                        if let Some(cb) = on_attr.take() {
+                            match attr_resp {
+                                Ok(resp) => result = Some(cb(&resp)),
+                                Err(_) => {
+                                    result = Some(Err(ErrorCode::InvalidData.into()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await?;
+
+        result.unwrap_or(Err(ErrorCode::InvalidData.into()))
     }
 
     /// Invoke a single command on a device.
