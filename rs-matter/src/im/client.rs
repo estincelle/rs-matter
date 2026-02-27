@@ -20,6 +20,8 @@
 //! This module provides client-side functionality for sending IM requests
 //! (Read, Write, Invoke) to Matter devices and processing their responses.
 
+pub use super::{AttrId, ClusterId, EndptId};
+
 use crate::error::{Error, ErrorCode};
 use crate::tlv::{FromTLV, TLVElement, TagType, ToTLV};
 use crate::transport::exchange::Exchange;
@@ -173,7 +175,6 @@ impl ImClient {
             exchange.id()
         );
 
-        // Send ReadRequest
         exchange
             .send_with(|_, wb| {
                 req.to_tlv(&TagType::Anonymous, wb)?;
@@ -182,7 +183,6 @@ impl ImClient {
             .await?;
 
         loop {
-            // Receive ReportData
             exchange.recv_fetch().await?;
 
             let (more_chunks, suppress_response) = {
@@ -271,7 +271,6 @@ impl ImClient {
 
         let req = InvokeRequestBuilder::new(cmd_data, timed_timeout_ms.is_some());
 
-        // Send InvokeRequest
         exchange
             .send_with(|_, wb| {
                 req.to_tlv(&TagType::Anonymous, wb)?;
@@ -280,7 +279,6 @@ impl ImClient {
             .await?;
 
         loop {
-            // Receive InvokeResponse
             exchange.recv_fetch().await?;
 
             let (more_chunks, suppress_response) = {
@@ -307,7 +305,9 @@ impl ImClient {
 
                 // Send StatusResponse to request the next chunk.
                 // This clears the rx buffer.
-                debug!("ImClient::invoke - more_chunks=true, sending StatusResponse for next chunk");
+                debug!(
+                    "ImClient::invoke - more_chunks=true, sending StatusResponse for next chunk"
+                );
                 exchange
                     .send_with(|_, wb| {
                         StatusResp::write(wb, IMStatusCode::Success)?;
@@ -351,7 +351,6 @@ impl ImClient {
 
         let req = WriteRequestBuilder::new(attr_data, timed_timeout_ms.is_some());
 
-        // Send WriteRequest
         exchange
             .send_with(|_, wb| {
                 req.to_tlv(&TagType::Anonymous, wb)?;
@@ -359,7 +358,6 @@ impl ImClient {
             })
             .await?;
 
-        // Receive WriteResponse
         exchange.recv_fetch().await?;
 
         // Check opcode before acknowledging
@@ -387,7 +385,6 @@ impl ImClient {
             timeout: timeout_ms,
         };
 
-        // Send TimedRequest
         exchange
             .send_with(|_, wb| {
                 req.to_tlv(&TagType::Anonymous, wb)?;
@@ -395,13 +392,11 @@ impl ImClient {
             })
             .await?;
 
-        // Receive StatusResponse
         exchange.recv_fetch().await?;
 
         let rx = exchange.rx()?;
         Self::check_opcode(rx.meta().proto_opcode, OpCode::StatusResponse)?;
 
-        // Parse and check status
         let status_resp = StatusResp::from_tlv(&TLVElement::new(rx.payload()))?;
         if status_resp.status != IMStatusCode::Success {
             error!("TimedRequest failed with status: {:?}", status_resp.status);
@@ -424,9 +419,6 @@ impl ImClient {
         }
     }
 }
-
-// Convenience type aliases for common use cases
-pub use super::{AttrId, ClusterId, EndptId};
 
 /// Extension methods for easier single-item operations
 impl ImClient {
