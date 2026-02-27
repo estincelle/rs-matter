@@ -759,18 +759,23 @@ async fn invoke_toggle(exchange: &mut Exchange<'_>) -> Result<IMStatusCode, Erro
         data: TLVElement::new(&empty_struct_tlv),
     };
 
-    let resp = ImClient::invoke(exchange, &[cmd_data], None).await?;
+    let mut status = IMStatusCode::Success;
 
-    if let Some(invoke_responses) = resp.invoke_responses {
-        if let Some(first_resp) = invoke_responses.iter().next() {
-            return match first_resp? {
-                CmdResp::Status(status) => Ok(status.status.status),
-                CmdResp::Cmd(_) => Ok(IMStatusCode::Success),
-            };
+    ImClient::invoke(exchange, &[cmd_data], None, |resp| {
+        if let Some(invoke_responses) = &resp.invoke_responses {
+            if let Some(first_resp) = invoke_responses.iter().next() {
+                match first_resp {
+                    Ok(CmdResp::Status(s)) => status = s.status.status,
+                    Ok(CmdResp::Cmd(_)) => status = IMStatusCode::Success,
+                    Err(_) => {}
+                }
+            }
         }
-    }
+        Ok(())
+    })
+    .await?;
 
-    Ok(IMStatusCode::Success)
+    Ok(status)
 }
 
 // ============================================================================
