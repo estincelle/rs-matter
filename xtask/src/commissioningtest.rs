@@ -717,15 +717,14 @@ async fn read_onoff_with_timeout(matter: &Matter<'_>) -> Result<bool, Error> {
 }
 
 async fn read_onoff(exchange: &mut Exchange<'_>) -> Result<bool, Error> {
-    let resp = ImClient::read_single(exchange, 1, CLUSTER_ON_OFF, ATTR_ON_OFF, true).await?;
-
-    match resp {
+    ImClient::read_single(exchange, 1, CLUSTER_ON_OFF, ATTR_ON_OFF, true, |resp| match resp {
         AttrResp::Data(data) => Ok(data.data.bool()?),
         AttrResp::Status(status) => {
             warn!("Read returned status: {:?}", status.status);
             Err(rs_matter::error::ErrorCode::InvalidData.into())
         }
-    }
+    })
+    .await
 }
 
 async fn invoke_toggle_with_timeout(matter: &Matter<'_>) -> Result<IMStatusCode, Error> {
