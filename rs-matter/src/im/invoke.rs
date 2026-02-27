@@ -272,4 +272,6 @@ pub struct InvokeResp<'a> {
     pub suppress_response: Option<bool>,
     /// The list of invoke responses
     pub invoke_responses: Option<TLVArray<'a, CmdResp<'a>>>,
+    /// Whether there are more chunked messages coming
+    pub more_chunks: Option<bool>,
 }
