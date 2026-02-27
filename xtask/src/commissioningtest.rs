@@ -471,7 +471,10 @@ async fn discover_and_resolve_device(
 /// Platform-specific implementation:
 /// - macOS: Uses astro-dnssd (native Bonjour)
 /// - Linux: Uses builtin mDNS querier with multicast sockets
-async fn discover_device(discriminator: u16, timeout_ms: u32) -> Result<DiscoveredDevice, Error> {
+async fn discover_device(
+    discriminator: u16,
+    timeout_ms: u32,
+) -> Result<DiscoveredDevice<4>, Error> {
     let filter = CommissionableFilter {
         discriminator: Some(discriminator),
         ..Default::default()
@@ -498,7 +501,7 @@ async fn discover_device(discriminator: u16, timeout_ms: u32) -> Result<Discover
 fn discover_device_macos(
     filter: &CommissionableFilter,
     timeout_ms: u32,
-) -> Result<Vec<DiscoveredDevice>, Error> {
+) -> Result<Vec<DiscoveredDevice<4>>, Error> {
     use rs_matter::transport::network::mdns::astro::discover_commissionable;
     discover_commissionable(filter, timeout_ms)
 }
@@ -508,7 +511,7 @@ fn discover_device_macos(
 async fn discover_device_linux(
     filter: &CommissionableFilter,
     timeout_ms: u32,
-) -> Result<Vec<DiscoveredDevice>, Error> {
+) -> Result<Vec<DiscoveredDevice<4>>, Error> {
     use rs_matter::transport::network::mdns::builtin::discover_commissionable;
     use rs_matter::transport::network::mdns::{MDNS_IPV4_BROADCAST_ADDR, MDNS_IPV6_BROADCAST_ADDR};
 
@@ -546,11 +549,13 @@ async fn discover_device_linux(
         None
     };
 
-    let devices = discover_commissionable(
+    let mut buf = [0u8; 1536];
+    let devices: heapless::Vec<DiscoveredDevice<4>, 4> = discover_commissionable(
         &mut &mdns_socket,
         &mut &mdns_socket,
         filter,
         timeout_ms,
+        &mut buf,
         Some(ipv4_addr),
         ipv6_interface,
     )
@@ -566,7 +571,7 @@ async fn discover_device_linux(
 /// - Filters out incorrect addresses (e.g., fe80::1 on macOS)
 /// - Prefers IPv4 for local testing to avoid scope ID issues
 /// - Sets scope ID for link-local IPv6 addresses
-fn resolve_device_address(device: &DiscoveredDevice) -> Result<Address, Error> {
+fn resolve_device_address(device: &DiscoveredDevice<4>) -> Result<Address, Error> {
     let interface_index = get_default_interface_index().unwrap_or(0);
 
     // Select the best address:
@@ -717,13 +722,20 @@ async fn read_onoff_with_timeout(matter: &Matter<'_>) -> Result<bool, Error> {
 }
 
 async fn read_onoff(exchange: &mut Exchange<'_>) -> Result<bool, Error> {
-    ImClient::read_single(exchange, 1, CLUSTER_ON_OFF, ATTR_ON_OFF, true, |resp| match resp {
-        AttrResp::Data(data) => Ok(data.data.bool()?),
-        AttrResp::Status(status) => {
-            warn!("Read returned status: {:?}", status.status);
-            Err(rs_matter::error::ErrorCode::InvalidData.into())
-        }
-    })
+    ImClient::read_single(
+        exchange,
+        1,
+        CLUSTER_ON_OFF,
+        ATTR_ON_OFF,
+        true,
+        |resp| match resp {
+            AttrResp::Data(data) => Ok(data.data.bool()?),
+            AttrResp::Status(status) => {
+                warn!("Read returned status: {:?}", status.status);
+                Err(rs_matter::error::ErrorCode::InvalidData.into())
+            }
+        },
+    )
     .await
 }
 
