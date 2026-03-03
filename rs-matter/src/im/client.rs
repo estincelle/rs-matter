@@ -233,22 +233,27 @@ impl ImClient {
         Ok(())
     }
 
-    /// Invoke a command on a device.
+    /// Invoke one or more commands on a device with full chunking support.
     ///
-    /// Sends an InvokeRequest and processes the InvokeResponse(s). If the
-    /// server's response is too large for a single message, it will be sent
-    /// across multiple chunks with the `more_chunks` flag set. This method
-    /// handles the chunking protocol automatically, invoking the callback
-    /// once per chunk.
+    /// This is the lowest-level invoke API. It supports multiple commands per
+    /// request and handles chunked responses automatically, invoking the
+    /// callback once per chunk.
     ///
-    /// The callback receives a reference to each chunk's `InvokeResp`.
-    /// Because the exchange's rx buffer is invalidated when sending the
-    /// `StatusResponse` to request the next chunk, callers must extract any
-    /// needed data from the response within the callback.
+    /// # Callback lifetime constraints
+    ///
+    /// The callback receives `&InvokeResp<'_>` where the lifetime is tied to
+    /// the exchange's RX buffer for the current chunk. Because the buffer is
+    /// invalidated between chunks, **only owned/`Copy` data can be extracted**
+    /// from the callback. Borrowed data (e.g., `TLVElement`, byte slices)
+    /// cannot escape the callback.
+    ///
+    /// For single-command invocations where you need zero-copy access to
+    /// borrowed response data, use [`invoke_single_cmd`](Self::invoke_single_cmd)
+    /// instead.
     ///
     /// # Arguments
     /// - `exchange` - An established exchange (PASE or CASE session)
-    /// - `cmd_data` - Command data to invoke
+    /// - `cmd_data` - One or more commands to invoke
     /// - `timed_timeout_ms` - Optional timeout for timed invoke (required for some commands)
     /// - `on_response` - Callback invoked for each InvokeResponse chunk
     pub async fn invoke<F>(
@@ -476,18 +481,29 @@ impl ImClient {
         result.unwrap_or(Err(ErrorCode::InvalidData.into()))
     }
 
-    /// Invoke a single command on a device.
+    /// Invoke a single command and extract an owned value via callback.
     ///
-    /// This is a convenience method that wraps `invoke()` for the common case
-    /// of invoking a single command. The callback receives the first
-    /// `CmdResp` found across all chunks and should extract the needed
-    /// data from it.
+    /// Convenience wrapper around [`invoke`](Self::invoke) for the common case
+    /// of sending one command and extracting a single value from the response.
+    /// The callback receives the first `CmdResp` and should return the
+    /// extracted data.
+    ///
+    /// # Callback lifetime constraints
+    ///
+    /// The same lifetime constraints as [`invoke`](Self::invoke) apply: the
+    /// callback's `CmdResp<'_>` borrows from a transient RX buffer, so
+    /// only owned/`Copy` types can be returned as `T`. Returning borrowed
+    /// types like `TLVElement<'_>` will not compile.
+    ///
+    /// For single-command invocations where you need zero-copy access to
+    /// the response's `TLVElement` data, use
+    /// [`invoke_single_cmd`](Self::invoke_single_cmd) instead.
     ///
     /// # Returns
     /// The value returned by the callback, or an error if no command
     /// response was found or the invoke failed.
-    pub async fn invoke_single<T, F>(
-        exchange: &mut Exchange<'_>,
+    pub async fn invoke_single<'a, T, F>(
+        exchange: &'a mut Exchange<'_>,
         endpoint: EndptId,
         cluster: ClusterId,
         cmd: u32,
@@ -496,7 +512,7 @@ impl ImClient {
         on_resp: F,
     ) -> Result<T, Error>
     where
-        F: FnOnce(&CmdResp<'_>) -> Result<T, Error>,
+        F: FnOnce(CmdResp<'_>) -> Result<T, Error>,
     {
         let path = CmdPath {
             endpoint: Some(endpoint),
@@ -518,7 +534,7 @@ impl ImClient {
                     if let Some(cmd_resp) = invoke_responses.iter().next() {
                         if let Some(cb) = on_resp.take() {
                             match cmd_resp {
-                                Ok(resp) => result = Some(cb(&resp)),
+                                Ok(resp) => result = Some(cb(resp)),
                                 Err(_) => {
                                     result = Some(Err(ErrorCode::InvalidData.into()));
                                 }
@@ -532,6 +548,92 @@ impl ImClient {
         .await?;
 
         result.unwrap_or(Err(ErrorCode::InvalidData.into()))
+    }
+
+    /// Invoke a single command and return the response with zero-copy access.
+    ///
+    /// Unlike [`invoke_single`](Self::invoke_single), this method does not use
+    /// a callback. Instead, it returns the `CmdResp` directly, with its
+    /// `TLVElement` data borrowing from the exchange's RX buffer. This enables
+    /// zero-copy access to response fields without the lifetime constraints
+    /// imposed by the callback pattern.
+    ///
+    /// This method follows the same pattern as [`write`](Self::write):
+    /// after receiving the response, it sends a standalone ACK (which preserves
+    /// the RX buffer) and then parses the response from the still-valid buffer.
+    ///
+    /// # Limitations
+    ///
+    /// This method does **not** support chunked responses. If the server
+    /// responds with `more_chunks=true`, an error is returned. In practice
+    /// this does not occur for single-command requests; if you need chunked
+    /// response handling, use [`invoke`](Self::invoke) directly.
+    ///
+    /// The exchange remains borrowed for the lifetime of the returned
+    /// `CmdResp`, since the response data points into the exchange's RX
+    /// buffer.
+    ///
+    /// # Returns
+    /// The first `CmdResp` from the invoke response, or an error if no
+    /// response was found, the invoke failed, or chunking was encountered.
+    pub async fn invoke_single_cmd<'a>(
+        exchange: &'a mut Exchange<'_>,
+        endpoint: EndptId,
+        cluster: ClusterId,
+        cmd: u32,
+        cmd_data: TLVElement<'_>,
+        timed_timeout_ms: Option<u16>,
+    ) -> Result<CmdResp<'a>, Error> {
+        // If timed, send TimedRequest first
+        if let Some(timeout_ms) = timed_timeout_ms {
+            Self::send_timed_request(exchange, timeout_ms).await?;
+        }
+
+        let path = CmdPath {
+            endpoint: Some(endpoint),
+            cluster: Some(cluster),
+            cmd: Some(cmd),
+        };
+
+        let cmd_data = [CmdData {
+            path,
+            data: cmd_data,
+        }];
+
+        let req = InvokeRequestBuilder::new(&cmd_data, timed_timeout_ms.is_some());
+
+        exchange
+            .send_with(|_, wb| {
+                req.to_tlv(&TagType::Anonymous, wb)?;
+                Ok(Some(OpCode::InvokeRequest.into()))
+            })
+            .await?;
+
+        exchange.recv_fetch().await?;
+
+        // Check opcode before acknowledging
+        {
+            let rx = exchange.rx()?;
+            Self::check_opcode(rx.meta().proto_opcode, OpCode::InvokeResponse)?;
+        }
+
+        // Send ACK — this preserves the RX buffer (unlike send_with/sender which clear it)
+        exchange.acknowledge().await?;
+
+        // Parse response from the still-valid RX buffer
+        let rx = exchange.rx()?;
+        let element = TLVElement::new(rx.payload());
+        let resp = InvokeResp::from_tlv(&element)?;
+
+        if resp.more_chunks.unwrap_or(false) {
+            return Err(ErrorCode::InvalidData.into());
+        }
+
+        resp.invoke_responses
+            .as_ref()
+            .and_then(|responses| responses.iter().next())
+            .ok_or(Error::from(ErrorCode::InvalidData))?
+            .map_err(|_| Error::from(ErrorCode::InvalidData))
     }
 }
 
