@@ -142,18 +142,23 @@ impl<'a> InvokeRequestBuilder<'a> {
 pub struct ImClient;
 
 impl ImClient {
-    /// Read attributes from a device.
+    /// Read attributes from a device with full chunking support.
     ///
-    /// Sends a ReadRequest and processes the ReportData response(s). If the
-    /// server's response is too large for a single message, it will be sent
-    /// across multiple chunks with the `more_chunks` flag set. This method
-    /// handles the chunking protocol automatically, invoking the callback
-    /// once per chunk.
+    /// This is the lowest-level read API. It supports wildcard paths and
+    /// handles chunked responses automatically, invoking the callback once
+    /// per chunk.
     ///
-    /// The callback receives a reference to each chunk's `ReportDataResp`.
-    /// Because the exchange's rx buffer is invalidated when sending the
-    /// `StatusResponse` to request the next chunk, callers must extract any
-    /// needed data from the response within the callback.
+    /// # Callback lifetime constraints
+    ///
+    /// The callback receives `&ReportDataResp<'_>` where the lifetime is
+    /// tied to the exchange's RX buffer for the current chunk. Because the
+    /// buffer is invalidated between chunks, **only owned/`Copy` data can
+    /// be extracted** from the callback. Borrowed data (e.g., `TLVElement`,
+    /// byte slices from `AttrData`) cannot escape the callback.
+    ///
+    /// For single-attribute reads where you need zero-copy access to
+    /// borrowed response data, use [`read_single_attr`](Self::read_single_attr)
+    /// instead.
     ///
     /// # Arguments
     /// - `exchange` - An established exchange (PASE or CASE session)
@@ -428,12 +433,23 @@ impl ImClient {
 
 /// Extension methods for easier single-item operations
 impl ImClient {
-    /// Read a single attribute from a device.
+    /// Read a single attribute and extract an owned value via callback.
     ///
-    /// This is a convenience method that wraps `read()` for the common case
-    /// of reading a single attribute. The callback receives the first
-    /// `AttrResp` found across all chunks and should extract the needed
-    /// data from it.
+    /// Convenience wrapper around [`read`](Self::read) for the common case
+    /// of reading one attribute and extracting a single value from the
+    /// response. The callback receives the first `AttrResp` and should
+    /// return the extracted data.
+    ///
+    /// # Callback lifetime constraints
+    ///
+    /// The same lifetime constraints as [`read`](Self::read) apply: the
+    /// callback's `AttrResp<'_>` borrows from a transient RX buffer, so
+    /// only owned/`Copy` types can be returned as `T`. Returning borrowed
+    /// types like `TLVElement<'_>` will not compile.
+    ///
+    /// For single-attribute reads where you need zero-copy access to the
+    /// response's `TLVElement` data, use
+    /// [`read_single_attr`](Self::read_single_attr) instead.
     ///
     /// # Returns
     /// The value returned by the callback, or an error if no attribute
@@ -632,6 +648,103 @@ impl ImClient {
         resp.invoke_responses
             .as_ref()
             .and_then(|responses| responses.iter().next())
+            .ok_or(Error::from(ErrorCode::InvalidData))?
+            .map_err(|_| Error::from(ErrorCode::InvalidData))
+    }
+
+    /// Read a single attribute and return the response with zero-copy access.
+    ///
+    /// Unlike [`read_single`](Self::read_single), this method does not use a
+    /// callback. Instead, it returns the `AttrResp` directly, with its
+    /// `TLVElement` data borrowing from the exchange's RX buffer. This enables
+    /// zero-copy access to attribute data without the lifetime constraints
+    /// imposed by the callback pattern.
+    ///
+    /// This method follows the same pattern as [`write`](Self::write) and
+    /// [`invoke_single_cmd`](Self::invoke_single_cmd): after receiving the
+    /// response, it sends a standalone ACK (which preserves the RX buffer)
+    /// and then parses the response from the still-valid buffer.
+    ///
+    /// # Limitations
+    ///
+    /// This method does **not** support chunked responses. If the server
+    /// responds with `more_chunks=true`, an error is returned. For wildcard
+    /// reads or large responses that may be chunked, use
+    /// [`read`](Self::read) directly.
+    ///
+    /// This method requires the server to set `suppress_response=true` on
+    /// the final ReportData chunk. This is standard behavior for
+    /// non-subscription reads per the Matter specification. If the server
+    /// sets `suppress_response=false`, an error is returned; use
+    /// [`read_single`](Self::read_single) with a callback for that case.
+    ///
+    /// The exchange remains borrowed for the lifetime of the returned
+    /// `AttrResp`, since the response data points into the exchange's RX
+    /// buffer.
+    ///
+    /// # Returns
+    /// The first `AttrResp` from the report data, or an error if no
+    /// attribute response was found, the read failed, chunking was
+    /// encountered, or `suppress_response` was false.
+    pub async fn read_single_attr<'a>(
+        exchange: &'a mut Exchange<'_>,
+        endpoint: EndptId,
+        cluster: ClusterId,
+        attr: AttrId,
+        fabric_filtered: bool,
+    ) -> Result<AttrResp<'a>, Error> {
+        let path = AttrPath {
+            endpoint: Some(endpoint),
+            cluster: Some(cluster),
+            attr: Some(attr),
+            ..Default::default()
+        };
+
+        let paths = [path];
+        let req = ReadRequestBuilder::attributes(&paths, fabric_filtered);
+
+        exchange
+            .send_with(|_, wb| {
+                req.to_tlv(&TagType::Anonymous, wb)?;
+                Ok(Some(OpCode::ReadRequest.into()))
+            })
+            .await?;
+
+        exchange.recv_fetch().await?;
+
+        // Check opcode and response flags before acknowledging
+        {
+            let rx = exchange.rx()?;
+            Self::check_opcode(rx.meta().proto_opcode, OpCode::ReportData)?;
+
+            let element = TLVElement::new(rx.payload());
+            let resp = ReportDataResp::from_tlv(&element)?;
+
+            if resp.more_chunks.unwrap_or(false) {
+                return Err(ErrorCode::InvalidData.into());
+            }
+
+            if !resp.suppress_response.unwrap_or(false) {
+                // suppress_response=false means the server expects a StatusResponse,
+                // which requires send_with() and clears the RX buffer, making
+                // zero-copy return impossible. For non-subscription reads, the spec
+                // says suppress_response should be true. Use read_single() with a
+                // callback for the suppress_response=false case.
+                return Err(ErrorCode::InvalidData.into());
+            }
+        }
+
+        // suppress_response=true: send standalone ACK (preserves RX buffer)
+        exchange.acknowledge().await?;
+
+        // Parse response from the still-valid RX buffer
+        let rx = exchange.rx()?;
+        let element = TLVElement::new(rx.payload());
+        let resp = ReportDataResp::from_tlv(&element)?;
+
+        resp.attr_reports
+            .as_ref()
+            .and_then(|reports| reports.iter().next())
             .ok_or(Error::from(ErrorCode::InvalidData))?
             .map_err(|_| Error::from(ErrorCode::InvalidData))
     }
