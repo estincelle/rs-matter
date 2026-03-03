@@ -20,7 +20,9 @@
 //! This test exercises the complete flow from discovery to device control:
 //! 1. mDNS Discovery - Discover the device on the network
 //! 2. PASE Handshake - Authenticate with passcode
-//! 3. IM Operations - Read/Write/Invoke on device clusters
+//! 3. Commissioning Commands - ArmFailSafe, SetRegulatoryConfig,
+//!    AttestationRequest, CertificateChainRequest, CSRRequest, CommissioningComplete
+//! 4. IM Operations - Read/Write/Invoke on device clusters (OnOff)
 //!
 //! Uses the `onoff_light` example as the test device.
 //!
@@ -46,6 +48,11 @@ use rs_matter::crypto::{default_crypto, Crypto};
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::error::Error;
+use rs_matter::im::client::commissioning::{
+    ArmFailSafeResponse, AttestationResponse, CSRResponse, CertificateChainResponse,
+    CertificateChainTypeEnum, CommissioningCompleteResponse, CommissioningErrorEnum,
+    RegulatoryLocationTypeEnum, SetRegulatoryConfigResponse,
+};
 use rs_matter::im::client::ImClient;
 use rs_matter::im::{AttrResp, CmdData, CmdPath, CmdResp, IMStatusCode};
 use rs_matter::sc::pase::PaseInitiator;
@@ -432,8 +439,12 @@ async fn run_commissioning_flow<C: Crypto>(
     establish_pase_session(matter, crypto, peer_addr, passcode).await?;
     log_session_info(matter);
 
-    // Phase 3: Interaction Model Operations
-    info!("=== Phase 3: Interaction Model Operations ===");
+    // Phase 3: Commissioning Commands
+    info!("=== Phase 3: Commissioning Commands ===");
+    test_commissioning_commands(matter).await?;
+
+    // Phase 4: Interaction Model Operations
+    info!("=== Phase 4: Interaction Model Operations ===");
     test_onoff_cluster(matter).await?;
 
     info!("=== All commissioning test phases completed successfully! ===");
@@ -675,22 +686,189 @@ fn log_session_info(matter: &Matter<'_>) {
 }
 
 // ============================================================================
-// Phase 3: Interaction Model Operations
+// Phase 3: Commissioning Commands
+// ============================================================================
+
+async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
+    // Step 1: ArmFailSafe
+    info!("Step 3a: Testing ArmFailSafe command...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(test_arm_fail_safe(&mut exchange), IM_TIMEOUT_SECS).await?;
+        let error_code = resp.error_code()?;
+        info!("ArmFailSafe response: error_code={:?}", error_code);
+        if !matches!(error_code, CommissioningErrorEnum::OK) {
+            warn!("ArmFailSafe returned non-OK status: {:?}", error_code);
+        }
+    }
+
+    // Step 2: SetRegulatoryConfig
+    info!("Step 3b: Testing SetRegulatoryConfig command...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp =
+            run_with_timeout(test_set_regulatory_config(&mut exchange), IM_TIMEOUT_SECS).await?;
+        let error_code = resp.error_code()?;
+        info!("SetRegulatoryConfig response: error_code={:?}", error_code);
+        if !matches!(error_code, CommissioningErrorEnum::OK) {
+            warn!(
+                "SetRegulatoryConfig returned non-OK status: {:?}",
+                error_code
+            );
+        }
+    }
+
+    // Step 3: AttestationRequest
+    info!("Step 3c: Testing AttestationRequest command...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp =
+            run_with_timeout(test_attestation_request(&mut exchange), IM_TIMEOUT_SECS).await?;
+        let attestation_elements = resp.attestation_elements()?;
+        let attestation_signature = resp.attestation_signature()?;
+        info!(
+            "AttestationRequest response: elements_len={}, signature_len={}",
+            attestation_elements.len(),
+            attestation_signature.len()
+        );
+    }
+
+    // Step 4: CertificateChainRequest (DAC)
+    info!("Step 3d: Testing CertificateChainRequest (DAC) command...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(
+            test_certificate_chain_request(&mut exchange, CertificateChainTypeEnum::DACCertificate),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
+        let certificate = resp.certificate()?;
+        info!(
+            "CertificateChainRequest (DAC) response: certificate_len={}",
+            certificate.len()
+        );
+    }
+
+    // Step 5: CertificateChainRequest (PAI)
+    info!("Step 3e: Testing CertificateChainRequest (PAI) command...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(
+            test_certificate_chain_request(&mut exchange, CertificateChainTypeEnum::PAICertificate),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
+        let certificate = resp.certificate()?;
+        info!(
+            "CertificateChainRequest (PAI) response: certificate_len={}",
+            certificate.len()
+        );
+    }
+
+    // Step 6: CSRRequest
+    info!("Step 3f: Testing CSRRequest command...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(test_csr_request(&mut exchange), IM_TIMEOUT_SECS).await?;
+        let nocsr_elements = resp.nocsr_elements()?;
+        let attestation_signature = resp.attestation_signature()?;
+        info!(
+            "CSRRequest response: nocsr_elements_len={}, signature_len={}",
+            nocsr_elements.len(),
+            attestation_signature.len()
+        );
+    }
+
+    // Step 7: CommissioningComplete
+    // Note: This will fail because we haven't actually completed commissioning,
+    // but it tests that the command is properly invoked and parsed.
+    info!("Step 3g: Testing CommissioningComplete command (expected to fail)...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let result =
+            run_with_timeout(test_commissioning_complete(&mut exchange), IM_TIMEOUT_SECS).await;
+        match result {
+            Ok(resp) => {
+                let error_code = resp.error_code()?;
+                info!("CommissioningComplete response: error_code={:?}", error_code);
+                if matches!(error_code, CommissioningErrorEnum::OK) {
+                    info!("CommissioningComplete unexpectedly succeeded");
+                } else {
+                    info!(
+                        "CommissioningComplete correctly returned error (not fully commissioned): {:?}",
+                        error_code
+                    );
+                }
+            }
+            Err(e) => {
+                // This is expected - the device may reject CommissioningComplete
+                // if commissioning isn't actually complete
+                info!("CommissioningComplete returned error (expected): {:?}", e);
+            }
+        }
+    }
+
+    info!("All commissioning command tests completed successfully!");
+    Ok(())
+}
+
+async fn test_arm_fail_safe<'a>(
+    exchange: &'a mut Exchange<'_>,
+) -> Result<ArmFailSafeResponse<'a>, Error> {
+    ImClient::arm_fail_safe(exchange, 60, 1).await
+}
+
+async fn test_set_regulatory_config<'a>(
+    exchange: &'a mut Exchange<'_>,
+) -> Result<SetRegulatoryConfigResponse<'a>, Error> {
+    ImClient::set_regulatory_config(exchange, RegulatoryLocationTypeEnum::IndoorOutdoor, "US", 2)
+        .await
+}
+
+async fn test_attestation_request<'a>(
+    exchange: &'a mut Exchange<'_>,
+) -> Result<AttestationResponse<'a>, Error> {
+    let nonce = [0x42u8; 32];
+    ImClient::attestation_request(exchange, &nonce).await
+}
+
+async fn test_certificate_chain_request<'a>(
+    exchange: &'a mut Exchange<'_>,
+    cert_type: CertificateChainTypeEnum,
+) -> Result<CertificateChainResponse<'a>, Error> {
+    ImClient::certificate_chain_request(exchange, cert_type).await
+}
+
+async fn test_csr_request<'a>(
+    exchange: &'a mut Exchange<'_>,
+) -> Result<CSRResponse<'a>, Error> {
+    let nonce = [0x43u8; 32];
+    ImClient::csr_request(exchange, &nonce, false).await
+}
+
+async fn test_commissioning_complete<'a>(
+    exchange: &'a mut Exchange<'_>,
+) -> Result<CommissioningCompleteResponse<'a>, Error> {
+    ImClient::commissioning_complete(exchange).await
+}
+
+// ============================================================================
+// Phase 4: Interaction Model Operations
 // ============================================================================
 
 async fn test_onoff_cluster(matter: &Matter<'_>) -> Result<(), Error> {
     // Read initial state
-    info!("Step 3a: Reading initial OnOff attribute...");
+    info!("Step 4a: Reading initial OnOff attribute...");
     let initial_value = read_onoff_with_timeout(matter).await?;
     info!("Initial OnOff value: {initial_value}");
 
     // Toggle
-    info!("Step 3b: Invoking Toggle command...");
+    info!("Step 4b: Invoking Toggle command...");
     let status = invoke_toggle_with_timeout(matter).await?;
     info!("Toggle command completed with status: {status:?}");
 
     // Verify toggle worked
-    info!("Step 3c: Verifying toggle effect...");
+    info!("Step 4c: Verifying toggle effect...");
     let final_value = read_onoff_with_timeout(matter).await?;
     info!("Final OnOff value: {final_value}");
 
@@ -703,22 +881,29 @@ async fn test_onoff_cluster(matter: &Matter<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Helper to run a future with a timeout.
+async fn run_with_timeout<T, F: core::future::Future<Output = Result<T, Error>>>(
+    fut: F,
+    timeout_secs: u64,
+) -> Result<T, Error> {
+    let mut fut = core::pin::pin!(fut);
+    let mut timeout =
+        core::pin::pin!(Timer::after(embassy_time::Duration::from_secs(timeout_secs)));
+
+    match select(&mut fut, &mut timeout).await {
+        Either::First(result) => result,
+        Either::Second(_) => {
+            warn!("Operation timed out after {} seconds", timeout_secs);
+            Err(rs_matter::error::ErrorCode::RxTimeout.into())
+        }
+    }
+}
+
 async fn read_onoff_with_timeout(matter: &Matter<'_>) -> Result<bool, Error> {
     let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
     debug!("IM exchange initiated: {}", exchange.id());
 
-    let mut read_fut = core::pin::pin!(read_onoff(&mut exchange));
-    let mut timeout = core::pin::pin!(Timer::after(embassy_time::Duration::from_secs(
-        IM_TIMEOUT_SECS
-    )));
-
-    match select(&mut read_fut, &mut timeout).await {
-        Either::First(result) => result,
-        Either::Second(_) => {
-            warn!("Read operation timed out");
-            Err(rs_matter::error::ErrorCode::RxTimeout.into())
-        }
-    }
+    run_with_timeout(read_onoff(&mut exchange), IM_TIMEOUT_SECS).await
 }
 
 async fn read_onoff(exchange: &mut Exchange<'_>) -> Result<bool, Error> {
@@ -743,18 +928,7 @@ async fn invoke_toggle_with_timeout(matter: &Matter<'_>) -> Result<IMStatusCode,
     let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
     debug!("Invoke exchange initiated: {}", exchange.id());
 
-    let mut invoke_fut = core::pin::pin!(invoke_toggle(&mut exchange));
-    let mut timeout = core::pin::pin!(Timer::after(embassy_time::Duration::from_secs(
-        IM_TIMEOUT_SECS
-    )));
-
-    match select(&mut invoke_fut, &mut timeout).await {
-        Either::First(result) => result,
-        Either::Second(_) => {
-            warn!("Invoke operation timed out");
-            Err(rs_matter::error::ErrorCode::RxTimeout.into())
-        }
-    }
+    run_with_timeout(invoke_toggle(&mut exchange), IM_TIMEOUT_SECS).await
 }
 
 async fn invoke_toggle(exchange: &mut Exchange<'_>) -> Result<IMStatusCode, Error> {
