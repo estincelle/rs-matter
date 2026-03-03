@@ -145,7 +145,7 @@ impl ImClient {
         };
         let cmd_data = TLVElement::new(&buf[..tail]);
 
-        let resp = Self::invoke_single(
+        let resp = Self::invoke_single_cmd(
             exchange,
             0, // endpoint 0
             GENERAL_COMMISSIONING_CLUSTER,
@@ -194,7 +194,7 @@ impl ImClient {
         };
         let cmd_data = TLVElement::new(&buf[..tail]);
 
-        let resp = Self::invoke_single(
+        let resp = Self::invoke_single_cmd(
             exchange,
             0, // endpoint 0
             GENERAL_COMMISSIONING_CLUSTER,
@@ -226,7 +226,7 @@ impl ImClient {
         // CommissioningComplete has no request fields - send empty struct
         let cmd_data = TLVElement::new(&[0x15, 0x18]); // Empty struct: start_struct + end_container
 
-        let resp = Self::invoke_single(
+        let resp = Self::invoke_single_cmd(
             exchange,
             0, // endpoint 0
             GENERAL_COMMISSIONING_CLUSTER,
@@ -270,7 +270,7 @@ impl ImClient {
         };
         let cmd_data = TLVElement::new(&buf[..tail]);
 
-        let resp = Self::invoke_single(
+        let resp = Self::invoke_single_cmd(
             exchange,
             0, // endpoint 0
             OPERATIONAL_CREDENTIALS_CLUSTER,
@@ -311,7 +311,7 @@ impl ImClient {
         };
         let cmd_data = TLVElement::new(&buf[..tail]);
 
-        let resp = Self::invoke_single(
+        let resp = Self::invoke_single_cmd(
             exchange,
             0, // endpoint 0
             OPERATIONAL_CREDENTIALS_CLUSTER,
@@ -357,7 +357,7 @@ impl ImClient {
         };
         let cmd_data = TLVElement::new(&buf[..tail]);
 
-        let resp = Self::invoke_single(
+        let resp = Self::invoke_single_cmd(
             exchange,
             0, // endpoint 0
             OPERATIONAL_CREDENTIALS_CLUSTER,
@@ -400,7 +400,7 @@ impl ImClient {
         };
         let cmd_data = TLVElement::new(&buf[..tail]);
 
-        let resp = Self::invoke_single(
+        let resp = Self::invoke_single_cmd(
             exchange,
             0, // endpoint 0
             OPERATIONAL_CREDENTIALS_CLUSTER,
@@ -470,7 +470,7 @@ impl ImClient {
         };
         let cmd_data = TLVElement::new(&buf[..tail]);
 
-        let resp = Self::invoke_single(
+        let resp = Self::invoke_single_cmd(
             exchange,
             0, // endpoint 0
             OPERATIONAL_CREDENTIALS_CLUSTER,
@@ -517,7 +517,7 @@ impl ImClient {
         };
         let cmd_data = TLVElement::new(&buf[..tail]);
 
-        let resp = Self::invoke_single(
+        let resp = Self::invoke_single_cmd(
             exchange,
             0, // endpoint 0
             OPERATIONAL_CREDENTIALS_CLUSTER,
@@ -560,7 +560,7 @@ impl ImClient {
         };
         let cmd_data = TLVElement::new(&buf[..tail]);
 
-        let resp = Self::invoke_single(
+        let resp = Self::invoke_single_cmd(
             exchange,
             0, // endpoint 0
             OPERATIONAL_CREDENTIALS_CLUSTER,
@@ -605,7 +605,7 @@ impl ImClient {
         };
         let cmd_data = TLVElement::new(&buf[..tail]);
 
-        let resp = Self::invoke_single(
+        let resp = Self::invoke_single_cmd(
             exchange,
             0, // endpoint 0
             OPERATIONAL_CREDENTIALS_CLUSTER,
