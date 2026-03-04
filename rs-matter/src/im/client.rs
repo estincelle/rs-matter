@@ -326,11 +326,19 @@ impl ImClient {
                     })
                     .await?;
             } else {
-                // Final chunk — send standalone ACK for MRP completion.
-                // Unlike ReportData, InvokeResponse does not use StatusResponse
-                // on the final chunk; the client just ACKs and closes.
-                debug!("ImClient::invoke - final chunk, sending standalone ACK");
-                exchange.acknowledge().await?;
+                // Final chunk
+                if !suppress_response {
+                    debug!("ImClient::invoke - final chunk, sending StatusResponse");
+                    exchange
+                        .send_with(|_, wb| {
+                            StatusResp::write(wb, IMStatusCode::Success)?;
+                            Ok(Some(OpCode::StatusResponse.into()))
+                        })
+                        .await?;
+                } else {
+                    debug!("ImClient::invoke - final chunk, sending standalone ACK");
+                    exchange.acknowledge().await?;
+                }
                 break;
             }
         }
@@ -411,7 +419,11 @@ impl ImClient {
         let status_resp = StatusResp::from_tlv(&TLVElement::new(rx.payload()))?;
         if status_resp.status != IMStatusCode::Success {
             error!("TimedRequest failed with status: {:?}", status_resp.status);
-            return Err(ErrorCode::InvalidData.into());
+            return Err(status_resp
+                .status
+                .to_error_code()
+                .unwrap_or(ErrorCode::Failure)
+                .into());
         }
 
         Ok(())
