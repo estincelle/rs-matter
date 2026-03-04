@@ -50,11 +50,11 @@ use rs_matter::im::client::ImClient;
 use rs_matter::im::{AttrResp, CmdResp, IMStatusCode};
 use rs_matter::sc::pase::PaseInitiator;
 use rs_matter::tlv::{TLVElement, TLVTag, TLVWrite};
-use rs_matter::utils::storage::WriteBuf;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::network::mdns::{CommissionableFilter, DiscoveredDevice};
 use rs_matter::transport::network::{Address, SocketAddr, SocketAddrV6};
 use rs_matter::utils::init::InitMaybeUninit;
+use rs_matter::utils::storage::WriteBuf;
 use rs_matter::Matter;
 
 use static_cell::StaticCell;
@@ -718,8 +718,7 @@ async fn read_onoff_with_timeout(matter: &Matter<'_>) -> Result<bool, Error> {
 }
 
 async fn read_onoff(exchange: &mut Exchange<'_>) -> Result<bool, Error> {
-    let resp =
-        ImClient::read_single_attr(exchange, 1, CLUSTER_ON_OFF, ATTR_ON_OFF, true).await?;
+    let resp = ImClient::read_single_attr(exchange, 1, CLUSTER_ON_OFF, ATTR_ON_OFF, true).await?;
 
     match resp {
         AttrResp::Data(data) => data.data.bool(),
