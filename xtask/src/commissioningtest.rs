@@ -20,7 +20,9 @@
 //! This test exercises the complete flow from discovery to device control:
 //! 1. mDNS Discovery - Discover the device on the network
 //! 2. PASE Handshake - Authenticate with passcode
-//! 3. Commissioning Commands - ArmFailSafe, SetRegulatoryConfig,
+//! 3. Commissioning Info & Commands - Read BasicCommissioningInfo,
+//!    RegulatoryConfig, LocationCapability, SupportsConcurrentConnection,
+//!    then ArmFailSafe, SetRegulatoryConfig, SetTCAcknowledgements,
 //!    AttestationRequest, CertificateChainRequest, CSRRequest, CommissioningComplete
 //! 4. IM Operations - Read/Write/Invoke on device clusters (OnOff)
 //!
@@ -49,9 +51,10 @@ use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::error::Error;
 use rs_matter::im::client::commissioning::{
-    ArmFailSafeResponse, AttestationResponse, CSRResponse, CertificateChainResponse,
-    CertificateChainTypeEnum, CommissioningCompleteResponse, CommissioningErrorEnum,
-    RegulatoryLocationTypeEnum, SetRegulatoryConfigResponse,
+    ArmFailSafeResponse, AttestationResponse, BasicCommissioningInfo, CSRResponse,
+    CertificateChainResponse, CertificateChainTypeEnum, CommissioningCompleteResponse,
+    CommissioningErrorEnum, RegulatoryLocationTypeEnum, SetRegulatoryConfigResponse,
+    SetTCAcknowledgementsResponse,
 };
 use rs_matter::im::client::ImClient;
 use rs_matter::im::{AttrResp, CmdData, CmdPath, CmdResp, IMStatusCode};
@@ -439,8 +442,8 @@ async fn run_commissioning_flow<C: Crypto>(
     establish_pase_session(matter, crypto, peer_addr, passcode).await?;
     log_session_info(matter);
 
-    // Phase 3: Commissioning Commands
-    info!("=== Phase 3: Commissioning Commands ===");
+    // Phase 3: Commissioning Info & Commands
+    info!("=== Phase 3: Commissioning Info & Commands ===");
     test_commissioning_commands(matter).await?;
 
     // Phase 4: Interaction Model Operations
@@ -690,8 +693,60 @@ fn log_session_info(matter: &Matter<'_>) {
 // ============================================================================
 
 async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
-    // Step 1: ArmFailSafe
-    info!("Step 3a: Testing ArmFailSafe command...");
+    // --- Attribute Reads (kReadCommissioningInfo) ---
+
+    // Step 3a: Read BasicCommissioningInfo
+    info!("Step 3a: Reading BasicCommissioningInfo...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(
+            test_read_basic_commissioning_info(&mut exchange),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
+        let fail_safe_expiry = resp.fail_safe_expiry_length_seconds()?;
+        let max_cumulative = resp.max_cumulative_failsafe_seconds()?;
+        info!(
+            "BasicCommissioningInfo: fail_safe_expiry={}s, max_cumulative={}s",
+            fail_safe_expiry, max_cumulative
+        );
+    }
+
+    // Step 3b: Read RegulatoryConfig
+    info!("Step 3b: Reading RegulatoryConfig...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp =
+            run_with_timeout(test_read_regulatory_config(&mut exchange), IM_TIMEOUT_SECS).await?;
+        info!("RegulatoryConfig: {:?}", resp);
+    }
+
+    // Step 3c: Read LocationCapability
+    info!("Step 3c: Reading LocationCapability...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp =
+            run_with_timeout(test_read_location_capability(&mut exchange), IM_TIMEOUT_SECS)
+                .await?;
+        info!("LocationCapability: {:?}", resp);
+    }
+
+    // Step 3d: Read SupportsConcurrentConnection
+    info!("Step 3d: Reading SupportsConcurrentConnection...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(
+            test_read_supports_concurrent_connection(&mut exchange),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
+        info!("SupportsConcurrentConnection: {}", resp);
+    }
+
+    // --- Commissioning Commands ---
+
+    // Step 3e: ArmFailSafe
+    info!("Step 3e: Testing ArmFailSafe command...");
     {
         let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
         let resp = run_with_timeout(test_arm_fail_safe(&mut exchange), IM_TIMEOUT_SECS).await?;
@@ -702,8 +757,8 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
         }
     }
 
-    // Step 2: SetRegulatoryConfig
-    info!("Step 3b: Testing SetRegulatoryConfig command...");
+    // Step 3f: SetRegulatoryConfig
+    info!("Step 3f: Testing SetRegulatoryConfig command...");
     {
         let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
         let resp =
@@ -718,8 +773,24 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
         }
     }
 
-    // Step 3: AttestationRequest
-    info!("Step 3c: Testing AttestationRequest command...");
+    // Step 3g: SetTCAcknowledgements
+    info!("Step 3g: Testing SetTCAcknowledgements command...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp =
+            run_with_timeout(test_set_tc_acknowledgements(&mut exchange), IM_TIMEOUT_SECS).await?;
+        let error_code = resp.error_code()?;
+        info!("SetTCAcknowledgements response: error_code={:?}", error_code);
+        if !matches!(error_code, CommissioningErrorEnum::OK) {
+            warn!(
+                "SetTCAcknowledgements returned non-OK status: {:?}",
+                error_code
+            );
+        }
+    }
+
+    // Step 3h: AttestationRequest
+    info!("Step 3h: Testing AttestationRequest command...");
     {
         let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
         let resp =
@@ -733,8 +804,8 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
         );
     }
 
-    // Step 4: CertificateChainRequest (DAC)
-    info!("Step 3d: Testing CertificateChainRequest (DAC) command...");
+    // Step 3i: CertificateChainRequest (DAC)
+    info!("Step 3i: Testing CertificateChainRequest (DAC) command...");
     {
         let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
         let resp = run_with_timeout(
@@ -749,8 +820,8 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
         );
     }
 
-    // Step 5: CertificateChainRequest (PAI)
-    info!("Step 3e: Testing CertificateChainRequest (PAI) command...");
+    // Step 3j: CertificateChainRequest (PAI)
+    info!("Step 3j: Testing CertificateChainRequest (PAI) command...");
     {
         let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
         let resp = run_with_timeout(
@@ -765,8 +836,8 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
         );
     }
 
-    // Step 6: CSRRequest
-    info!("Step 3f: Testing CSRRequest command...");
+    // Step 3k: CSRRequest
+    info!("Step 3k: Testing CSRRequest command...");
     {
         let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
         let resp = run_with_timeout(test_csr_request(&mut exchange), IM_TIMEOUT_SECS).await?;
@@ -779,10 +850,10 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
         );
     }
 
-    // Step 7: CommissioningComplete
+    // Step 3l: CommissioningComplete
     // Note: This will fail because we haven't actually completed commissioning,
     // but it tests that the command is properly invoked and parsed.
-    info!("Step 3g: Testing CommissioningComplete command (expected to fail)...");
+    info!("Step 3l: Testing CommissioningComplete command (expected to fail)...");
     {
         let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
         let result =
@@ -850,6 +921,36 @@ async fn test_commissioning_complete<'a>(
     exchange: &'a mut Exchange<'_>,
 ) -> Result<CommissioningCompleteResponse<'a>, Error> {
     ImClient::commissioning_complete(exchange).await
+}
+
+async fn test_read_basic_commissioning_info<'a>(
+    exchange: &'a mut Exchange<'_>,
+) -> Result<BasicCommissioningInfo<'a>, Error> {
+    ImClient::read_basic_commissioning_info(exchange).await
+}
+
+async fn test_read_regulatory_config(
+    exchange: &mut Exchange<'_>,
+) -> Result<RegulatoryLocationTypeEnum, Error> {
+    ImClient::read_regulatory_config(exchange).await
+}
+
+async fn test_read_location_capability(
+    exchange: &mut Exchange<'_>,
+) -> Result<RegulatoryLocationTypeEnum, Error> {
+    ImClient::read_location_capability(exchange).await
+}
+
+async fn test_read_supports_concurrent_connection(
+    exchange: &mut Exchange<'_>,
+) -> Result<bool, Error> {
+    ImClient::read_supports_concurrent_connection(exchange).await
+}
+
+async fn test_set_tc_acknowledgements<'a>(
+    exchange: &'a mut Exchange<'_>,
+) -> Result<SetTCAcknowledgementsResponse<'a>, Error> {
+    ImClient::set_tc_acknowledgements(exchange, 1, 0x0001).await
 }
 
 // ============================================================================
