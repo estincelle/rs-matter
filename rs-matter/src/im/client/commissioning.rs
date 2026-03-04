@@ -106,6 +106,9 @@ pub use crate::dm::clusters::decl::operational_credentials::{
     UpdateNOCRequestBuilder,
 };
 
+/// All commissioning clusters live on endpoint 0 per the Matter spec.
+const ENDPOINT: super::EndptId = 0;
+
 /// General Commissioning cluster ID
 pub const GENERAL_COMMISSIONING_CLUSTER: u32 = 0x0030;
 
@@ -244,7 +247,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             GENERAL_COMMISSIONING_CLUSTER,
             CMD_ARM_FAIL_SAFE,
             cmd_data,
@@ -293,7 +296,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             GENERAL_COMMISSIONING_CLUSTER,
             CMD_SET_REGULATORY_CONFIG,
             cmd_data,
@@ -332,7 +335,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             GENERAL_COMMISSIONING_CLUSTER,
             CMD_COMMISSIONING_COMPLETE,
             cmd_data,
@@ -379,7 +382,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             GENERAL_COMMISSIONING_CLUSTER,
             CMD_SET_TC_ACKNOWLEDGEMENTS,
             cmd_data,
@@ -427,7 +430,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             OPERATIONAL_CREDENTIALS_CLUSTER,
             CMD_ATTESTATION_REQUEST,
             cmd_data,
@@ -468,7 +471,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             OPERATIONAL_CREDENTIALS_CLUSTER,
             CMD_CERTIFICATE_CHAIN_REQUEST,
             cmd_data,
@@ -518,7 +521,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             OPERATIONAL_CREDENTIALS_CLUSTER,
             CMD_CSR_REQUEST,
             cmd_data,
@@ -538,6 +541,9 @@ impl ImClient {
     /// # Arguments
     /// - `exchange` - An established exchange (typically PASE session)
     /// - `root_ca` - The root CA certificate in Matter TLV format
+    ///
+    /// # Stack Usage
+    /// Allocates a 512-byte buffer on the stack for TLV encoding.
     ///
     /// # Returns
     /// `Ok(())` on success, or an error if the command failed.
@@ -561,7 +567,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             OPERATIONAL_CREDENTIALS_CLUSTER,
             CMD_ADD_TRUSTED_ROOT_CERTIFICATE,
             cmd_data,
@@ -585,6 +591,9 @@ impl ImClient {
     /// - `ipk` - The 16-byte Identity Protection Key
     /// - `case_admin_subject` - Node ID of the administrator
     /// - `admin_vendor_id` - Vendor ID of the administrator
+    ///
+    /// # Stack Usage
+    /// Allocates a 1024-byte buffer on the stack for TLV encoding.
     ///
     /// # Returns
     /// The NOC response containing status and fabric index.
@@ -620,7 +629,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             OPERATIONAL_CREDENTIALS_CLUSTER,
             CMD_ADD_NOC,
             cmd_data,
@@ -642,6 +651,9 @@ impl ImClient {
     /// - `exchange` - An established CASE session on the fabric to update
     /// - `noc` - The new NOC in Matter TLV format
     /// - `icac` - Optional new ICAC in Matter TLV format
+    ///
+    /// # Stack Usage
+    /// Allocates a 1024-byte buffer on the stack for TLV encoding.
     ///
     /// # Returns
     /// The NOC response containing status and fabric index.
@@ -667,7 +679,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             OPERATIONAL_CREDENTIALS_CLUSTER,
             CMD_UPDATE_NOC,
             cmd_data,
@@ -710,7 +722,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             OPERATIONAL_CREDENTIALS_CLUSTER,
             CMD_UPDATE_FABRIC_LABEL,
             cmd_data,
@@ -755,7 +767,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             OPERATIONAL_CREDENTIALS_CLUSTER,
             CMD_REMOVE_FABRIC,
             cmd_data,
@@ -783,6 +795,9 @@ impl ImClient {
     /// - `discriminator` - The discriminator to use for discovery
     /// - `iterations` - PBKDF2 iteration count
     /// - `salt` - PBKDF2 salt (max 32 bytes)
+    ///
+    /// # Stack Usage
+    /// Allocates a 256-byte buffer on the stack for TLV encoding.
     ///
     /// # Returns
     /// `Ok(())` on success, or an error if the command failed.
@@ -814,7 +829,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             ADMINISTRATOR_COMMISSIONING_CLUSTER,
             CMD_OPEN_COMMISSIONING_WINDOW,
             cmd_data,
@@ -860,7 +875,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             ADMINISTRATOR_COMMISSIONING_CLUSTER,
             CMD_OPEN_BASIC_COMMISSIONING_WINDOW,
             cmd_data,
@@ -897,7 +912,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             ADMINISTRATOR_COMMISSIONING_CLUSTER,
             CMD_REVOKE_COMMISSIONING,
             cmd_data,
@@ -925,7 +940,7 @@ impl ImClient {
     ) -> Result<BasicCommissioningInfo<'a>, Error> {
         let resp = Self::read_single_attr(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             GENERAL_COMMISSIONING_CLUSTER,
             ATTR_BASIC_COMMISSIONING_INFO,
             false,
@@ -951,7 +966,7 @@ impl ImClient {
     ) -> Result<RegulatoryLocationTypeEnum, Error> {
         let resp = Self::read_single_attr(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             GENERAL_COMMISSIONING_CLUSTER,
             ATTR_REGULATORY_CONFIG,
             false,
@@ -978,7 +993,7 @@ impl ImClient {
     ) -> Result<RegulatoryLocationTypeEnum, Error> {
         let resp = Self::read_single_attr(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             GENERAL_COMMISSIONING_CLUSTER,
             ATTR_LOCATION_CAPABILITY,
             false,
@@ -1006,7 +1021,7 @@ impl ImClient {
     ) -> Result<bool, Error> {
         let resp = Self::read_single_attr(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             GENERAL_COMMISSIONING_CLUSTER,
             ATTR_SUPPORTS_CONCURRENT_CONNECTION,
             false,
@@ -1028,6 +1043,9 @@ impl ImClient {
     /// - `vendor_id` - Optional vendor ID to set
     /// - `vid_verification_statement` - Optional VID verification statement (max 85 bytes)
     /// - `vvsc` - Optional Vendor Verification Signing Certificate (max 400 bytes)
+    ///
+    /// # Stack Usage
+    /// Allocates a 512-byte buffer on the stack for TLV encoding.
     ///
     /// # Returns
     /// `Ok(())` on success, or an error if the command failed.
@@ -1055,7 +1073,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             OPERATIONAL_CREDENTIALS_CLUSTER,
             CMD_SET_VID_VERIFICATION_STATEMENT,
             cmd_data,
@@ -1105,7 +1123,7 @@ impl ImClient {
 
         let resp = Self::invoke_single_cmd(
             exchange,
-            0, // endpoint 0
+            ENDPOINT,
             OPERATIONAL_CREDENTIALS_CLUSTER,
             CMD_SIGN_VID_VERIFICATION_REQUEST,
             cmd_data,
