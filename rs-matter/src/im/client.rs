@@ -627,10 +627,25 @@ impl ImClient {
 
         exchange.recv_fetch().await?;
 
-        // Check opcode before acknowledging
+        // Check opcode and more_chunks before acknowledging
         {
             let rx = exchange.rx()?;
             Self::check_opcode(rx.meta().proto_opcode, OpCode::InvokeResponse)?;
+
+            let element = TLVElement::new(rx.payload());
+            let resp = InvokeResp::from_tlv(&element)?;
+
+            if resp.more_chunks.unwrap_or(false) {
+                // Abort chunked response: send StatusResponse(Failure) so the
+                // server knows we're not continuing the transaction.
+                exchange
+                    .send_with(|_, wb| {
+                        StatusResp::write(wb, IMStatusCode::Failure)?;
+                        Ok(Some(OpCode::StatusResponse.into()))
+                    })
+                    .await?;
+                return Err(ErrorCode::InvalidData.into());
+            }
         }
 
         // Send ACK — this preserves the RX buffer (unlike send_with/sender which clear it)
@@ -640,10 +655,6 @@ impl ImClient {
         let rx = exchange.rx()?;
         let element = TLVElement::new(rx.payload());
         let resp = InvokeResp::from_tlv(&element)?;
-
-        if resp.more_chunks.unwrap_or(false) {
-            return Err(ErrorCode::InvalidData.into());
-        }
 
         resp.invoke_responses
             .as_ref()
@@ -721,6 +732,14 @@ impl ImClient {
             let resp = ReportDataResp::from_tlv(&element)?;
 
             if resp.more_chunks.unwrap_or(false) {
+                // Abort chunked response: send StatusResponse(Failure) so the
+                // server knows we're not continuing the transaction.
+                exchange
+                    .send_with(|_, wb| {
+                        StatusResp::write(wb, IMStatusCode::Failure)?;
+                        Ok(Some(OpCode::StatusResponse.into()))
+                    })
+                    .await?;
                 return Err(ErrorCode::InvalidData.into());
             }
 
