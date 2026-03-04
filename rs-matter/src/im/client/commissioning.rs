@@ -52,7 +52,7 @@
 //! - [`read_supports_concurrent_connection`](ImClient::read_supports_concurrent_connection) - Read concurrent connection support
 
 use crate::error::{Error, ErrorCode};
-use crate::tlv::{FromTLV, Octets, TLVBuilderParent, TLVElement, TLVTag, TLVWriteParent};
+use crate::tlv::{FromTLV, Octets, TLVBuilderParent, TLVElement, TLVTag, TLVWrite, TLVWriteParent};
 use crate::transport::exchange::Exchange;
 use crate::utils::storage::WriteBuf;
 
@@ -321,7 +321,14 @@ impl ImClient {
         exchange: &'a mut Exchange<'_>,
     ) -> Result<CommissioningCompleteResponse<'a>, Error> {
         // CommissioningComplete has no request fields - send empty struct
-        let cmd_data = TLVElement::new(&[0x15, 0x18]); // Empty struct: start_struct + end_container
+        let mut buf = [0u8; 8];
+        let tail = {
+            let mut wb = WriteBuf::new(&mut buf);
+            wb.start_struct(&TLVTag::Anonymous)?;
+            wb.end_container()?;
+            wb.get_tail()
+        };
+        let cmd_data = TLVElement::new(&buf[..tail]);
 
         let resp = Self::invoke_single_cmd(
             exchange,
@@ -401,6 +408,10 @@ impl ImClient {
         exchange: &'a mut Exchange<'_>,
         nonce: &[u8],
     ) -> Result<AttestationResponse<'a>, Error> {
+        if nonce.len() != 32 {
+            return Err(ErrorCode::ConstraintError.into());
+        }
+
         let mut buf = [0u8; 64];
         let tail = {
             let wb = WriteBuf::new(&mut buf);
@@ -487,6 +498,10 @@ impl ImClient {
         nonce: &[u8],
         is_for_update: bool,
     ) -> Result<CSRResponse<'a>, Error> {
+        if nonce.len() != 32 {
+            return Err(ErrorCode::ConstraintError.into());
+        }
+
         let mut buf = [0u8; 64];
         let tail = {
             let wb = WriteBuf::new(&mut buf);
@@ -582,6 +597,10 @@ impl ImClient {
         case_admin_subject: u64,
         admin_vendor_id: u16,
     ) -> Result<NOCResponse<'a>, Error> {
+        if ipk.len() != 16 {
+            return Err(ErrorCode::ConstraintError.into());
+        }
+
         let mut buf = [0u8; 1024]; // NOC + ICAC can be large
         let tail = {
             let wb = WriteBuf::new(&mut buf);
@@ -867,7 +886,14 @@ impl ImClient {
     /// `Ok(())` on success, or an error if the command failed.
     pub async fn revoke_commissioning(exchange: &mut Exchange<'_>) -> Result<(), Error> {
         // RevokeCommissioning has no request fields - send empty struct
-        let cmd_data = TLVElement::new(&[0x15, 0x18]); // Empty struct: start_struct + end_container
+        let mut buf = [0u8; 8];
+        let tail = {
+            let mut wb = WriteBuf::new(&mut buf);
+            wb.start_struct(&TLVTag::Anonymous)?;
+            wb.end_container()?;
+            wb.get_tail()
+        };
+        let cmd_data = TLVElement::new(&buf[..tail]);
 
         let resp = Self::invoke_single_cmd(
             exchange,
@@ -1058,6 +1084,10 @@ impl ImClient {
         fabric_index: u8,
         client_challenge: &[u8],
     ) -> Result<SignVIDVerificationResponse<'a>, Error> {
+        if client_challenge.len() != 32 {
+            return Err(ErrorCode::ConstraintError.into());
+        }
+
         let mut buf = [0u8; 64];
         let tail = {
             let wb = WriteBuf::new(&mut buf);
