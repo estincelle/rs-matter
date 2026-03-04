@@ -60,11 +60,11 @@ use rs_matter::im::client::ImClient;
 use rs_matter::im::{AttrResp, CmdResp, IMStatusCode};
 use rs_matter::sc::pase::PaseInitiator;
 use rs_matter::tlv::{TLVElement, TLVTag, TLVWrite};
-use rs_matter::utils::storage::WriteBuf;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::network::mdns::{CommissionableFilter, DiscoveredDevice};
 use rs_matter::transport::network::{Address, SocketAddr, SocketAddrV6};
 use rs_matter::utils::init::InitMaybeUninit;
+use rs_matter::utils::storage::WriteBuf;
 use rs_matter::Matter;
 
 use static_cell::StaticCell;
@@ -726,9 +726,11 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
     info!("Step 3c: Reading LocationCapability...");
     {
         let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
-        let resp =
-            run_with_timeout(test_read_location_capability(&mut exchange), IM_TIMEOUT_SECS)
-                .await?;
+        let resp = run_with_timeout(
+            test_read_location_capability(&mut exchange),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
         info!("LocationCapability: {:?}", resp);
     }
 
@@ -782,7 +784,10 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
         let resp =
             run_with_timeout(test_set_tc_acknowledgements(&mut exchange), IM_TIMEOUT_SECS).await?;
         let error_code = resp.error_code()?;
-        info!("SetTCAcknowledgements response: error_code={:?}", error_code);
+        info!(
+            "SetTCAcknowledgements response: error_code={:?}",
+            error_code
+        );
         assert!(
             matches!(error_code, CommissioningErrorEnum::OK),
             "SetTCAcknowledgements failed: {:?}",
@@ -861,7 +866,10 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
         let resp =
             run_with_timeout(test_commissioning_complete(&mut exchange), IM_TIMEOUT_SECS).await?;
         let error_code = resp.error_code()?;
-        info!("CommissioningComplete response: error_code={:?}", error_code);
+        info!(
+            "CommissioningComplete response: error_code={:?}",
+            error_code
+        );
         assert!(
             !matches!(error_code, CommissioningErrorEnum::OK),
             "CommissioningComplete should fail when not fully commissioned"
@@ -899,9 +907,7 @@ async fn test_certificate_chain_request<'a>(
     ImClient::certificate_chain_request(exchange, cert_type).await
 }
 
-async fn test_csr_request<'a>(
-    exchange: &'a mut Exchange<'_>,
-) -> Result<CSRResponse<'a>, Error> {
+async fn test_csr_request<'a>(exchange: &'a mut Exchange<'_>) -> Result<CSRResponse<'a>, Error> {
     let nonce = [0x43u8; 32];
     ImClient::csr_request(exchange, &nonce, false).await
 }
@@ -977,8 +983,9 @@ async fn run_with_timeout<T, F: core::future::Future<Output = Result<T, Error>>>
     timeout_secs: u64,
 ) -> Result<T, Error> {
     let mut fut = core::pin::pin!(fut);
-    let mut timeout =
-        core::pin::pin!(Timer::after(embassy_time::Duration::from_secs(timeout_secs)));
+    let mut timeout = core::pin::pin!(Timer::after(embassy_time::Duration::from_secs(
+        timeout_secs
+    )));
 
     match select(&mut fut, &mut timeout).await {
         Either::First(result) => result,
@@ -997,8 +1004,7 @@ async fn read_onoff_with_timeout(matter: &Matter<'_>) -> Result<bool, Error> {
 }
 
 async fn read_onoff(exchange: &mut Exchange<'_>) -> Result<bool, Error> {
-    let resp =
-        ImClient::read_single_attr(exchange, 1, CLUSTER_ON_OFF, ATTR_ON_OFF, true).await?;
+    let resp = ImClient::read_single_attr(exchange, 1, CLUSTER_ON_OFF, ATTR_ON_OFF, true).await?;
 
     match resp {
         AttrResp::Data(data) => data.data.bool(),
