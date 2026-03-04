@@ -191,7 +191,7 @@ impl ImClient {
         loop {
             exchange.recv_fetch().await?;
 
-            let (more_chunks, suppress_response) = {
+            let (more_chunks, suppress_response, cb_result) = {
                 let rx = exchange.rx()?;
                 Self::check_opcode(rx.meta().proto_opcode, OpCode::ReportData)?;
 
@@ -202,12 +202,19 @@ impl ImClient {
                 let suppress = resp.suppress_response.unwrap_or(false);
 
                 // Invoke callback while the rx buffer is still valid
-                on_report(&resp)?;
+                let cb_result = on_report(&resp);
 
-                (more, suppress)
+                (more, suppress, cb_result)
             };
 
             if more_chunks {
+                // If the callback failed, abort the chunked transaction by
+                // sending StatusResponse(Failure) so the server stops sending.
+                if let Err(e) = cb_result {
+                    Self::send_abort(exchange).await?;
+                    return Err(e);
+                }
+
                 // Send StatusResponse to request the next chunk.
                 // This clears the rx buffer.
                 debug!("ImClient::read - more_chunks=true, sending StatusResponse for next chunk");
@@ -218,7 +225,9 @@ impl ImClient {
                     })
                     .await?;
             } else {
-                // Final chunk
+                // Final chunk — propagate callback error after completing the exchange.
+                cb_result?;
+
                 if !suppress_response {
                     debug!("ImClient::read - final chunk, sending StatusResponse");
                     exchange
@@ -292,7 +301,7 @@ impl ImClient {
         loop {
             exchange.recv_fetch().await?;
 
-            let (more_chunks, suppress_response) = {
+            let (more_chunks, suppress_response, cb_result) = {
                 let rx = exchange.rx()?;
                 Self::check_opcode(rx.meta().proto_opcode, OpCode::InvokeResponse)?;
 
@@ -303,15 +312,23 @@ impl ImClient {
                 let suppress = resp.suppress_response.unwrap_or(false);
 
                 // Invoke callback while the rx buffer is still valid
-                on_response(&resp)?;
+                let cb_result = on_response(&resp);
 
-                (more, suppress)
+                (more, suppress, cb_result)
             };
 
             if more_chunks {
                 // Spec forbids suppress_response=true with more_chunks=true
                 if suppress_response {
+                    Self::send_abort(exchange).await?;
                     return Err(ErrorCode::InvalidData.into());
+                }
+
+                // If the callback failed, abort the chunked transaction by
+                // sending StatusResponse(Failure) so the server stops sending.
+                if let Err(e) = cb_result {
+                    Self::send_abort(exchange).await?;
+                    return Err(e);
                 }
 
                 // Send StatusResponse to request the next chunk.
@@ -326,7 +343,9 @@ impl ImClient {
                     })
                     .await?;
             } else {
-                // Final chunk
+                // Final chunk — propagate callback error after completing the exchange.
+                cb_result?;
+
                 if !suppress_response {
                     debug!("ImClient::invoke - final chunk, sending StatusResponse");
                     exchange
@@ -440,6 +459,19 @@ impl ImClient {
         } else {
             Ok(())
         }
+    }
+
+    /// Abort a chunked transaction by sending `StatusResponse(Failure)`.
+    ///
+    /// This tells the server we are not continuing the transaction, preventing
+    /// it from waiting indefinitely for the next `StatusResponse(Success)`.
+    async fn send_abort(exchange: &mut Exchange<'_>) -> Result<(), Error> {
+        exchange
+            .send_with(|_, wb| {
+                StatusResp::write(wb, IMStatusCode::Failure)?;
+                Ok(Some(OpCode::StatusResponse.into()))
+            })
+            .await
     }
 }
 
@@ -648,14 +680,7 @@ impl ImClient {
             let resp = InvokeResp::from_tlv(&element)?;
 
             if resp.more_chunks.unwrap_or(false) {
-                // Abort chunked response: send StatusResponse(Failure) so the
-                // server knows we're not continuing the transaction.
-                exchange
-                    .send_with(|_, wb| {
-                        StatusResp::write(wb, IMStatusCode::Failure)?;
-                        Ok(Some(OpCode::StatusResponse.into()))
-                    })
-                    .await?;
+                Self::send_abort(exchange).await?;
                 return Err(ErrorCode::InvalidData.into());
             }
         }
@@ -744,14 +769,7 @@ impl ImClient {
             let resp = ReportDataResp::from_tlv(&element)?;
 
             if resp.more_chunks.unwrap_or(false) {
-                // Abort chunked response: send StatusResponse(Failure) so the
-                // server knows we're not continuing the transaction.
-                exchange
-                    .send_with(|_, wb| {
-                        StatusResp::write(wb, IMStatusCode::Failure)?;
-                        Ok(Some(OpCode::StatusResponse.into()))
-                    })
-                    .await?;
+                Self::send_abort(exchange).await?;
                 return Err(ErrorCode::InvalidData.into());
             }
 
