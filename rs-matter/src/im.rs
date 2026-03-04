@@ -198,7 +198,6 @@ pub type ClusterId = u32;
 pub type AttrId = u32;
 pub type CmdId = u32;
 pub type ActionId = u8;
-pub type AttributeId = u32;
 pub type ClusterStatus = u8;
 pub type CommandRef = u16;
 pub type CompressedFabricId = u64;

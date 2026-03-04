@@ -562,8 +562,8 @@ impl ImClient {
     /// # Returns
     /// The value returned by the callback, or an error if no command
     /// response was found or the invoke failed.
-    pub async fn invoke_single<'a, T, F>(
-        exchange: &'a mut Exchange<'_>,
+    pub async fn invoke_single<T, F>(
+        exchange: &mut Exchange<'_>,
         endpoint: EndptId,
         cluster: ClusterId,
         cmd: u32,
