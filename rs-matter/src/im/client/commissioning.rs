@@ -201,8 +201,8 @@ fn extract_cmd_data<'a>(resp: &CmdResp<'a>) -> Result<TLVElement<'a>, Error> {
         CmdResp::Status(status) => {
             let im_status = status.status.status;
             error!("Command failed with IM status: {:?}", im_status);
-            // Safe to unwrap: receiving a Status instead of Cmd means the command
-            // failed — the server only omits command data on non-Success status
+            // This function is only used for commands that return response data.
+            // A Status-only response for such commands always indicates failure.
             Err(im_status
                 .to_error_code()
                 .unwrap_or(ErrorCode::Failure)
