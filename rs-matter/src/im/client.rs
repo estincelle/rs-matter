@@ -629,6 +629,16 @@ impl ImClient {
     /// this does not occur for single-command requests; if you need chunked
     /// response handling, use [`invoke`](Self::invoke) directly.
     ///
+    /// **Note:** When the server sets `suppress_response=false` (the default
+    /// for InvokeResponse), the spec requires the client to send
+    /// `StatusResponse(Success)`. However, sending a StatusResponse clears
+    /// the RX buffer, which would break zero-copy access. This method
+    /// sends a standalone ACK instead, which completes the MRP-layer
+    /// exchange but deviates from the IM-layer spec requirement. In
+    /// practice this works because servers clean up the exchange on timeout.
+    /// If strict spec compliance is required, use
+    /// [`invoke_single`](Self::invoke_single) with a callback.
+    ///
     /// The exchange remains borrowed for the lifetime of the returned
     /// `CmdResp`, since the response data points into the exchange's RX
     /// buffer.
@@ -685,7 +695,8 @@ impl ImClient {
             }
         }
 
-        // Send ACK — this preserves the RX buffer (unlike send_with/sender which clear it)
+        // Send ACK — this preserves the RX buffer (unlike send_with which clears it).
+        // See doc comment on suppress_response handling above.
         exchange.acknowledge().await?;
 
         // Parse response from the still-valid RX buffer
@@ -723,7 +734,8 @@ impl ImClient {
     /// This method requires the server to set `suppress_response=true` on
     /// the final ReportData chunk. This is standard behavior for
     /// non-subscription reads per the Matter specification. If the server
-    /// sets `suppress_response=false`, an error is returned; use
+    /// sets `suppress_response=false`, the exchange is completed with
+    /// `StatusResponse(Success)` and an error is returned; use
     /// [`read_single`](Self::read_single) with a callback for that case.
     ///
     /// The exchange remains borrowed for the lifetime of the returned
@@ -761,7 +773,7 @@ impl ImClient {
         exchange.recv_fetch().await?;
 
         // Check opcode and response flags before acknowledging
-        {
+        let suppress_response = {
             let rx = exchange.rx()?;
             Self::check_opcode(rx.meta().proto_opcode, OpCode::ReportData)?;
 
@@ -773,14 +785,22 @@ impl ImClient {
                 return Err(ErrorCode::InvalidData.into());
             }
 
-            if !resp.suppress_response.unwrap_or(false) {
-                // suppress_response=false means the server expects a StatusResponse,
-                // which requires send_with() and clears the RX buffer, making
-                // zero-copy return impossible. For non-subscription reads, the spec
-                // says suppress_response should be true. Use read_single() with a
-                // callback for the suppress_response=false case.
-                return Err(ErrorCode::InvalidData.into());
-            }
+            resp.suppress_response.unwrap_or(false)
+        };
+
+        if !suppress_response {
+            // suppress_response=false means the server expects a StatusResponse,
+            // which requires send_with() and clears the RX buffer, making
+            // zero-copy return impossible. Complete the exchange properly,
+            // then return an error. Use read_single() with a callback for
+            // the suppress_response=false case.
+            exchange
+                .send_with(|_, wb| {
+                    StatusResp::write(wb, IMStatusCode::Success)?;
+                    Ok(Some(OpCode::StatusResponse.into()))
+                })
+                .await?;
+            return Err(ErrorCode::InvalidData.into());
         }
 
         // suppress_response=true: send standalone ACK (preserves RX buffer)
