@@ -57,9 +57,10 @@ use rs_matter::im::client::commissioning::{
     SetTCAcknowledgementsResponse,
 };
 use rs_matter::im::client::ImClient;
-use rs_matter::im::{AttrResp, CmdData, CmdPath, CmdResp, IMStatusCode};
+use rs_matter::im::{AttrResp, CmdResp, IMStatusCode};
 use rs_matter::sc::pase::PaseInitiator;
-use rs_matter::tlv::TLVElement;
+use rs_matter::tlv::{TLVElement, TLVTag, TLVWrite};
+use rs_matter::utils::storage::WriteBuf;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::network::mdns::{CommissionableFilter, DiscoveredDevice};
 use rs_matter::transport::network::{Address, SocketAddr, SocketAddrV6};
@@ -752,9 +753,11 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
         let resp = run_with_timeout(test_arm_fail_safe(&mut exchange), IM_TIMEOUT_SECS).await?;
         let error_code = resp.error_code()?;
         info!("ArmFailSafe response: error_code={:?}", error_code);
-        if !matches!(error_code, CommissioningErrorEnum::OK) {
-            warn!("ArmFailSafe returned non-OK status: {:?}", error_code);
-        }
+        assert!(
+            matches!(error_code, CommissioningErrorEnum::OK),
+            "ArmFailSafe failed: {:?}",
+            error_code
+        );
     }
 
     // Step 3f: SetRegulatoryConfig
@@ -765,12 +768,11 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
             run_with_timeout(test_set_regulatory_config(&mut exchange), IM_TIMEOUT_SECS).await?;
         let error_code = resp.error_code()?;
         info!("SetRegulatoryConfig response: error_code={:?}", error_code);
-        if !matches!(error_code, CommissioningErrorEnum::OK) {
-            warn!(
-                "SetRegulatoryConfig returned non-OK status: {:?}",
-                error_code
-            );
-        }
+        assert!(
+            matches!(error_code, CommissioningErrorEnum::OK),
+            "SetRegulatoryConfig failed: {:?}",
+            error_code
+        );
     }
 
     // Step 3g: SetTCAcknowledgements
@@ -781,12 +783,11 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
             run_with_timeout(test_set_tc_acknowledgements(&mut exchange), IM_TIMEOUT_SECS).await?;
         let error_code = resp.error_code()?;
         info!("SetTCAcknowledgements response: error_code={:?}", error_code);
-        if !matches!(error_code, CommissioningErrorEnum::OK) {
-            warn!(
-                "SetTCAcknowledgements returned non-OK status: {:?}",
-                error_code
-            );
-        }
+        assert!(
+            matches!(error_code, CommissioningErrorEnum::OK),
+            "SetTCAcknowledgements failed: {:?}",
+            error_code
+        );
     }
 
     // Step 3h: AttestationRequest
@@ -851,32 +852,20 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
     }
 
     // Step 3l: CommissioningComplete
-    // Note: This will fail because we haven't actually completed commissioning,
-    // but it tests that the command is properly invoked and parsed.
+    // This should fail because we haven't completed all commissioning steps
+    // (no NOC provisioned, no CASE session). The device should return a
+    // commissioning error, not IM-level success.
     info!("Step 3l: Testing CommissioningComplete command (expected to fail)...");
     {
         let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
-        let result =
-            run_with_timeout(test_commissioning_complete(&mut exchange), IM_TIMEOUT_SECS).await;
-        match result {
-            Ok(resp) => {
-                let error_code = resp.error_code()?;
-                info!("CommissioningComplete response: error_code={:?}", error_code);
-                if matches!(error_code, CommissioningErrorEnum::OK) {
-                    info!("CommissioningComplete unexpectedly succeeded");
-                } else {
-                    info!(
-                        "CommissioningComplete correctly returned error (not fully commissioned): {:?}",
-                        error_code
-                    );
-                }
-            }
-            Err(e) => {
-                // This is expected - the device may reject CommissioningComplete
-                // if commissioning isn't actually complete
-                info!("CommissioningComplete returned error (expected): {:?}", e);
-            }
-        }
+        let resp =
+            run_with_timeout(test_commissioning_complete(&mut exchange), IM_TIMEOUT_SECS).await?;
+        let error_code = resp.error_code()?;
+        info!("CommissioningComplete response: error_code={:?}", error_code);
+        assert!(
+            !matches!(error_code, CommissioningErrorEnum::OK),
+            "CommissioningComplete should fail when not fully commissioned"
+        );
     }
 
     info!("All commissioning command tests completed successfully!");
@@ -1008,21 +997,16 @@ async fn read_onoff_with_timeout(matter: &Matter<'_>) -> Result<bool, Error> {
 }
 
 async fn read_onoff(exchange: &mut Exchange<'_>) -> Result<bool, Error> {
-    ImClient::read_single(
-        exchange,
-        1,
-        CLUSTER_ON_OFF,
-        ATTR_ON_OFF,
-        true,
-        |resp| match resp {
-            AttrResp::Data(data) => Ok(data.data.bool()?),
-            AttrResp::Status(status) => {
-                warn!("Read returned status: {:?}", status.status);
-                Err(rs_matter::error::ErrorCode::InvalidData.into())
-            }
-        },
-    )
-    .await
+    let resp =
+        ImClient::read_single_attr(exchange, 1, CLUSTER_ON_OFF, ATTR_ON_OFF, true).await?;
+
+    match resp {
+        AttrResp::Data(data) => data.data.bool(),
+        AttrResp::Status(status) => {
+            warn!("Read returned status: {:?}", status.status);
+            Err(rs_matter::error::ErrorCode::InvalidData.into())
+        }
+    }
 }
 
 async fn invoke_toggle_with_timeout(matter: &Matter<'_>) -> Result<IMStatusCode, Error> {
@@ -1033,36 +1017,29 @@ async fn invoke_toggle_with_timeout(matter: &Matter<'_>) -> Result<IMStatusCode,
 }
 
 async fn invoke_toggle(exchange: &mut Exchange<'_>) -> Result<IMStatusCode, Error> {
-    let path = CmdPath {
-        endpoint: Some(1),
-        cluster: Some(CLUSTER_ON_OFF),
-        cmd: Some(CMD_TOGGLE),
+    // Toggle command has no data - build empty TLV struct
+    let mut buf = [0u8; 8];
+    let tail = {
+        let mut wb = WriteBuf::new(&mut buf);
+        wb.start_struct(&TLVTag::Anonymous)?;
+        wb.end_container()?;
+        wb.get_tail()
     };
 
-    // Toggle command has no data - empty TLV struct
-    let empty_struct_tlv = [0x15, 0x18];
-    let cmd_data = CmdData {
-        path,
-        data: TLVElement::new(&empty_struct_tlv),
-    };
-
-    let mut status = IMStatusCode::Success;
-
-    ImClient::invoke(exchange, &[cmd_data], None, |resp| {
-        if let Some(invoke_responses) = &resp.invoke_responses {
-            if let Some(first_resp) = invoke_responses.iter().next() {
-                match first_resp {
-                    Ok(CmdResp::Status(s)) => status = s.status.status,
-                    Ok(CmdResp::Cmd(_)) => status = IMStatusCode::Success,
-                    Err(_) => {}
-                }
-            }
-        }
-        Ok(())
-    })
+    let resp = ImClient::invoke_single_cmd(
+        exchange,
+        1,
+        CLUSTER_ON_OFF,
+        CMD_TOGGLE,
+        TLVElement::new(&buf[..tail]),
+        None,
+    )
     .await?;
 
-    Ok(status)
+    match resp {
+        CmdResp::Status(s) => Ok(s.status.status),
+        CmdResp::Cmd(_) => Ok(IMStatusCode::Success),
+    }
 }
 
 // ============================================================================
