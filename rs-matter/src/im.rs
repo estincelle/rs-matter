@@ -105,6 +105,33 @@ impl From<Error> for IMStatusCode {
     }
 }
 
+impl IMStatusCode {
+    /// Convert a non-success IM status code to an `ErrorCode`.
+    ///
+    /// Returns `None` for `Success`, since success is not an error.
+    pub fn to_error_code(self) -> Option<ErrorCode> {
+        match self {
+            Self::Success => None,
+            Self::UnsupportedAccess => Some(ErrorCode::UnsupportedAccess),
+            Self::InvalidAction => Some(ErrorCode::InvalidAction),
+            Self::UnsupportedCommand => Some(ErrorCode::CommandNotFound),
+            Self::InvalidCommand => Some(ErrorCode::InvalidCommand),
+            Self::UnsupportedAttribute => Some(ErrorCode::AttributeNotFound),
+            Self::ConstraintError => Some(ErrorCode::ConstraintError),
+            Self::ResourceExhausted => Some(ErrorCode::ResourceExhausted),
+            Self::NotFound => Some(ErrorCode::NotFound),
+            Self::InvalidDataType => Some(ErrorCode::InvalidDataType),
+            Self::DataVersionMismatch => Some(ErrorCode::DataVersionMismatch),
+            Self::Busy => Some(ErrorCode::Busy),
+            Self::UnsupportedEndpoint => Some(ErrorCode::EndpointNotFound),
+            Self::UnsupportedCluster => Some(ErrorCode::ClusterNotFound),
+            Self::NeedsTimedInteraction => Some(ErrorCode::InvalidAction),
+            Self::FailSafeRequired => Some(ErrorCode::FailSafeRequired),
+            _ => Some(ErrorCode::Failure),
+        }
+    }
+}
+
 impl FromTLV<'_> for IMStatusCode {
     fn from_tlv(t: &TLVElement) -> Result<Self, Error> {
         FromPrimitive::from_u16(t.u16()?).ok_or_else(|| ErrorCode::Invalid.into())
