@@ -26,6 +26,7 @@
 //! - [`arm_fail_safe`](ImClient::arm_fail_safe) - Arm/extend the fail-safe timer
 //! - [`set_regulatory_config`](ImClient::set_regulatory_config) - Set regulatory configuration
 //! - [`commissioning_complete`](ImClient::commissioning_complete) - Complete commissioning
+//! - [`set_tc_acknowledgements`](ImClient::set_tc_acknowledgements) - Set Terms & Conditions acknowledgements
 //!
 //! ## Operational Credentials (0x003E)
 //! - [`attestation_request`](ImClient::attestation_request) - Request device attestation
@@ -36,13 +37,26 @@
 //! - [`update_noc`](ImClient::update_noc) - Update existing NOC (certificate rotation)
 //! - [`update_fabric_label`](ImClient::update_fabric_label) - Update fabric label
 //! - [`remove_fabric`](ImClient::remove_fabric) - Remove a fabric from the device
+//! - [`set_vid_verification_statement`](ImClient::set_vid_verification_statement) - Set VID verification statement
+//! - [`sign_vid_verification_request`](ImClient::sign_vid_verification_request) - Request VID verification signature
+//!
+//! ## Administrator Commissioning (0x003C)
+//! - [`open_commissioning_window`](ImClient::open_commissioning_window) - Open enhanced commissioning window (timed)
+//! - [`open_basic_commissioning_window`](ImClient::open_basic_commissioning_window) - Open basic commissioning window (timed)
+//! - [`revoke_commissioning`](ImClient::revoke_commissioning) - Revoke active commissioning window (timed)
+//!
+//! ## Attribute Reads (General Commissioning)
+//! - [`read_basic_commissioning_info`](ImClient::read_basic_commissioning_info) - Read fail-safe timing parameters
+//! - [`read_regulatory_config`](ImClient::read_regulatory_config) - Read current regulatory configuration
+//! - [`read_location_capability`](ImClient::read_location_capability) - Read device location capability
+//! - [`read_supports_concurrent_connection`](ImClient::read_supports_concurrent_connection) - Read concurrent connection support
 
 use crate::error::{Error, ErrorCode};
-use crate::tlv::{Octets, TLVBuilderParent, TLVElement, TLVTag, TLVWriteParent};
+use crate::tlv::{FromTLV, Octets, TLVBuilderParent, TLVElement, TLVTag, TLVWriteParent};
 use crate::transport::exchange::Exchange;
 use crate::utils::storage::WriteBuf;
 
-use super::{CmdResp, ImClient};
+use super::{AttrResp, CmdResp, ImClient};
 
 // General Commissioning types
 pub use crate::dm::clusters::decl::general_commissioning::{
@@ -50,12 +64,22 @@ pub use crate::dm::clusters::decl::general_commissioning::{
     ArmFailSafeRequestBuilder,
     // Response types (TLVElement wrappers)
     ArmFailSafeResponse,
+    BasicCommissioningInfo,
     CommissioningCompleteResponse,
     // Enums
     CommissioningErrorEnum,
     RegulatoryLocationTypeEnum,
     SetRegulatoryConfigRequestBuilder,
     SetRegulatoryConfigResponse,
+    SetTCAcknowledgementsRequestBuilder,
+    SetTCAcknowledgementsResponse,
+};
+
+// Administrator Commissioning types
+pub use crate::dm::clusters::decl::administrator_commissioning::{
+    // Request builders
+    OpenBasicCommissioningWindowRequestBuilder,
+    OpenCommissioningWindowRequestBuilder,
 };
 
 // Operational Credentials types
@@ -75,6 +99,9 @@ pub use crate::dm::clusters::decl::operational_credentials::{
     NOCResponse,
     NodeOperationalCertStatusEnum,
     RemoveFabricRequestBuilder,
+    SetVIDVerificationStatementRequestBuilder,
+    SignVIDVerificationRequestRequestBuilder,
+    SignVIDVerificationResponse,
     UpdateFabricLabelRequestBuilder,
     UpdateNOCRequestBuilder,
 };
@@ -85,10 +112,14 @@ pub const GENERAL_COMMISSIONING_CLUSTER: u32 = 0x0030;
 /// Operational Credentials cluster ID
 pub const OPERATIONAL_CREDENTIALS_CLUSTER: u32 = 0x003E;
 
+/// Administrator Commissioning cluster ID
+pub const ADMINISTRATOR_COMMISSIONING_CLUSTER: u32 = 0x003C;
+
 // General Commissioning command IDs
 const CMD_ARM_FAIL_SAFE: u32 = 0x00;
 const CMD_SET_REGULATORY_CONFIG: u32 = 0x02;
 const CMD_COMMISSIONING_COMPLETE: u32 = 0x04;
+const CMD_SET_TC_ACKNOWLEDGEMENTS: u32 = 0x06;
 
 // Operational Credentials command IDs
 const CMD_ATTESTATION_REQUEST: u32 = 0x00;
@@ -99,14 +130,80 @@ const CMD_UPDATE_NOC: u32 = 0x07;
 const CMD_UPDATE_FABRIC_LABEL: u32 = 0x09;
 const CMD_REMOVE_FABRIC: u32 = 0x0A;
 const CMD_ADD_TRUSTED_ROOT_CERTIFICATE: u32 = 0x0B;
+const CMD_SET_VID_VERIFICATION_STATEMENT: u32 = 0x0C;
+const CMD_SIGN_VID_VERIFICATION_REQUEST: u32 = 0x0D;
+
+// Administrator Commissioning command IDs
+const CMD_OPEN_COMMISSIONING_WINDOW: u32 = 0x00;
+const CMD_OPEN_BASIC_COMMISSIONING_WINDOW: u32 = 0x01;
+const CMD_REVOKE_COMMISSIONING: u32 = 0x02;
+
+/// Default timed invoke timeout for Administrator Commissioning commands (10 seconds).
+/// Matches the C++ SDK `kTimedInvokeTimeoutMs` value.
+const ADMIN_COMM_TIMED_INVOKE_TIMEOUT_MS: u16 = 10000;
+
+// General Commissioning attribute IDs
+const ATTR_BASIC_COMMISSIONING_INFO: u32 = 0x01;
+const ATTR_REGULATORY_CONFIG: u32 = 0x02;
+const ATTR_LOCATION_CAPABILITY: u32 = 0x03;
+const ATTR_SUPPORTS_CONCURRENT_CONNECTION: u32 = 0x04;
+
+/// Extract the attribute data from an AttrResp, returning an error if it's a status-only response.
+fn extract_attr_data<'a>(resp: &AttrResp<'a>) -> Result<TLVElement<'a>, Error> {
+    match resp {
+        AttrResp::Data(attr_data) => Ok(attr_data.data.clone()),
+        AttrResp::Status(status) => {
+            let im_status = status.status.status;
+            error!("Attribute read failed with IM status: {:?}", im_status);
+            // Safe to unwrap: this arm only matches non-Success statuses
+            // (a successful read always produces AttrResp::Data)
+            Err(im_status
+                .to_error_code()
+                .unwrap_or(ErrorCode::Failure)
+                .into())
+        }
+    }
+}
+
+/// Extract a success status from a CmdResp for commands that return `DefaultSuccess`.
+///
+/// These commands have no response data — a successful invocation comes back as
+/// `CmdResp::Status` with `IMStatusCode::Success`.
+fn extract_status_success(resp: &CmdResp<'_>) -> Result<(), Error> {
+    match resp {
+        CmdResp::Status(status) => {
+            let im_status = status.status.status;
+            match im_status.to_error_code() {
+                None => Ok(()), // Success
+                Some(error_code) => {
+                    error!("Command failed with IM status: {:?}", im_status);
+                    Err(error_code.into())
+                }
+            }
+        }
+        // Server sent command data for a DefaultSuccess command — unexpected but not an error
+        CmdResp::Cmd(_) => Ok(()),
+    }
+}
 
 /// Extract the command response data from a CmdResp, returning an error if it's a status-only response.
+///
+/// When the server returns a status instead of command data, the IM status code
+/// is mapped to the most appropriate [`ErrorCode`] variant (e.g.,
+/// `UnsupportedCommand` → [`ErrorCode::CommandNotFound`],
+/// `ConstraintError` → [`ErrorCode::ConstraintError`]).
 fn extract_cmd_data<'a>(resp: &CmdResp<'a>) -> Result<TLVElement<'a>, Error> {
     match resp {
         CmdResp::Cmd(cmd_data) => Ok(cmd_data.data.clone()),
         CmdResp::Status(status) => {
-            error!("Command failed with IM status: {:?}", status.status.status);
-            Err(ErrorCode::InvalidCommand.into())
+            let im_status = status.status.status;
+            error!("Command failed with IM status: {:?}", im_status);
+            // Safe to unwrap: receiving a Status instead of Cmd means the command
+            // failed — the server only omits command data on non-Success status
+            Err(im_status
+                .to_error_code()
+                .unwrap_or(ErrorCode::Failure)
+                .into())
         }
     }
 }
@@ -238,6 +335,53 @@ impl ImClient {
 
         let data = extract_cmd_data(&resp)?;
         Ok(CommissioningCompleteResponse::new(data))
+    }
+
+    /// Set the Terms & Conditions acknowledgements on the device.
+    ///
+    /// Required for Matter 1.4+ devices that support the Terms & Conditions
+    /// feature. The commissioner sends the TC version and user response flags
+    /// to indicate which terms have been accepted.
+    ///
+    /// # Arguments
+    /// - `exchange` - An established exchange (typically PASE session during commissioning)
+    /// - `tc_version` - The Terms & Conditions version being acknowledged
+    /// - `tc_user_response` - Bitmap of user responses (accepted terms)
+    ///
+    /// # Returns
+    /// The response containing the error code.
+    /// Use `.error_code()` to access the field.
+    pub async fn set_tc_acknowledgements<'a>(
+        exchange: &'a mut Exchange<'_>,
+        tc_version: u16,
+        tc_user_response: u16,
+    ) -> Result<SetTCAcknowledgementsResponse<'a>, Error> {
+        let mut buf = [0u8; 32];
+        let tail = {
+            let wb = WriteBuf::new(&mut buf);
+            let parent = TLVWriteParent::new((), wb);
+
+            let mut parent = SetTCAcknowledgementsRequestBuilder::new(parent, &TLVTag::Anonymous)?
+                .tc_version(tc_version)?
+                .tc_user_response(tc_user_response)?
+                .end()?;
+
+            parent.writer().get_tail()
+        };
+        let cmd_data = TLVElement::new(&buf[..tail]);
+
+        let resp = Self::invoke_single_cmd(
+            exchange,
+            0, // endpoint 0
+            GENERAL_COMMISSIONING_CLUSTER,
+            CMD_SET_TC_ACKNOWLEDGEMENTS,
+            cmd_data,
+            None,
+        )
+        .await?;
+
+        let data = extract_cmd_data(&resp)?;
+        Ok(SetTCAcknowledgementsResponse::new(data))
     }
 
     /// Request device attestation information.
@@ -410,22 +554,7 @@ impl ImClient {
         )
         .await?;
 
-        // AddTrustedRootCertificate returns no response data on success,
-        // just check that we got a successful command response
-        match &resp {
-            CmdResp::Cmd(_) => Ok(()),
-            CmdResp::Status(status) => {
-                if status.status.status == crate::im::IMStatusCode::Success {
-                    Ok(())
-                } else {
-                    error!(
-                        "AddTrustedRootCertificate failed with status: {:?}",
-                        status.status.status
-                    );
-                    Err(ErrorCode::InvalidCommand.into())
-                }
-            }
-        }
+        extract_status_success(&resp)
     }
 
     /// Add a Node Operational Certificate to commission the device.
@@ -617,5 +746,344 @@ impl ImClient {
 
         let data = extract_cmd_data(&resp)?;
         Ok(NOCResponse::new(data))
+    }
+
+    /// Open an enhanced commissioning window on the device.
+    ///
+    /// This command instructs the device to begin advertising and accepting
+    /// PASE connections using the provided PAKE passcode verifier. This is
+    /// used for multi-admin scenarios where a new administrator needs to
+    /// commission an already-commissioned device.
+    ///
+    /// This is a timed command (10-second timeout per the Matter spec).
+    ///
+    /// # Arguments
+    /// - `exchange` - An established CASE session with administrator privileges
+    /// - `commissioning_timeout` - Duration in seconds the window should remain open
+    /// - `pake_passcode_verifier` - The PAKE passcode verifier (SPAKE2+ verifier)
+    /// - `discriminator` - The discriminator to use for discovery
+    /// - `iterations` - PBKDF2 iteration count
+    /// - `salt` - PBKDF2 salt (max 32 bytes)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or an error if the command failed.
+    pub async fn open_commissioning_window(
+        exchange: &mut Exchange<'_>,
+        commissioning_timeout: u16,
+        pake_passcode_verifier: &[u8],
+        discriminator: u16,
+        iterations: u32,
+        salt: &[u8],
+    ) -> Result<(), Error> {
+        let mut buf = [0u8; 256]; // Verifier + salt can be large
+        let tail = {
+            let wb = WriteBuf::new(&mut buf);
+            let parent = TLVWriteParent::new((), wb);
+
+            let mut parent =
+                OpenCommissioningWindowRequestBuilder::new(parent, &TLVTag::Anonymous)?
+                    .commissioning_timeout(commissioning_timeout)?
+                    .pake_passcode_verifier(Octets(pake_passcode_verifier))?
+                    .discriminator(discriminator)?
+                    .iterations(iterations)?
+                    .salt(Octets(salt))?
+                    .end()?;
+
+            parent.writer().get_tail()
+        };
+        let cmd_data = TLVElement::new(&buf[..tail]);
+
+        let resp = Self::invoke_single_cmd(
+            exchange,
+            0, // endpoint 0
+            ADMINISTRATOR_COMMISSIONING_CLUSTER,
+            CMD_OPEN_COMMISSIONING_WINDOW,
+            cmd_data,
+            Some(ADMIN_COMM_TIMED_INVOKE_TIMEOUT_MS),
+        )
+        .await?;
+
+        extract_status_success(&resp)
+    }
+
+    /// Open a basic commissioning window on the device.
+    ///
+    /// This command instructs the device to begin advertising and accepting
+    /// PASE connections using the device's default passcode. This is a simpler
+    /// alternative to [`open_commissioning_window`](Self::open_commissioning_window)
+    /// that does not require generating a PAKE verifier.
+    ///
+    /// This is a timed command (10-second timeout per the Matter spec).
+    ///
+    /// # Arguments
+    /// - `exchange` - An established CASE session with administrator privileges
+    /// - `commissioning_timeout` - Duration in seconds the window should remain open
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or an error if the command failed.
+    pub async fn open_basic_commissioning_window(
+        exchange: &mut Exchange<'_>,
+        commissioning_timeout: u16,
+    ) -> Result<(), Error> {
+        let mut buf = [0u8; 16];
+        let tail = {
+            let wb = WriteBuf::new(&mut buf);
+            let parent = TLVWriteParent::new((), wb);
+
+            let mut parent =
+                OpenBasicCommissioningWindowRequestBuilder::new(parent, &TLVTag::Anonymous)?
+                    .commissioning_timeout(commissioning_timeout)?
+                    .end()?;
+
+            parent.writer().get_tail()
+        };
+        let cmd_data = TLVElement::new(&buf[..tail]);
+
+        let resp = Self::invoke_single_cmd(
+            exchange,
+            0, // endpoint 0
+            ADMINISTRATOR_COMMISSIONING_CLUSTER,
+            CMD_OPEN_BASIC_COMMISSIONING_WINDOW,
+            cmd_data,
+            Some(ADMIN_COMM_TIMED_INVOKE_TIMEOUT_MS),
+        )
+        .await?;
+
+        extract_status_success(&resp)
+    }
+
+    /// Revoke any active commissioning window on the device.
+    ///
+    /// This command closes any open commissioning window (either enhanced or
+    /// basic). If no commissioning window is open, the device may return an
+    /// error.
+    ///
+    /// This is a timed command (10-second timeout per the Matter spec).
+    ///
+    /// # Arguments
+    /// - `exchange` - An established CASE session with administrator privileges
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or an error if the command failed.
+    pub async fn revoke_commissioning(exchange: &mut Exchange<'_>) -> Result<(), Error> {
+        // RevokeCommissioning has no request fields - send empty struct
+        let cmd_data = TLVElement::new(&[0x15, 0x18]); // Empty struct: start_struct + end_container
+
+        let resp = Self::invoke_single_cmd(
+            exchange,
+            0, // endpoint 0
+            ADMINISTRATOR_COMMISSIONING_CLUSTER,
+            CMD_REVOKE_COMMISSIONING,
+            cmd_data,
+            Some(ADMIN_COMM_TIMED_INVOKE_TIMEOUT_MS),
+        )
+        .await?;
+
+        extract_status_success(&resp)
+    }
+
+    /// Read the basic commissioning info from the device.
+    ///
+    /// Returns the fail-safe timing parameters: the default fail-safe expiry
+    /// length and the maximum cumulative fail-safe duration. These values are
+    /// used to determine how long to arm the fail-safe timer during commissioning.
+    ///
+    /// # Arguments
+    /// - `exchange` - An established exchange (typically PASE session)
+    ///
+    /// # Returns
+    /// The `BasicCommissioningInfo` struct.
+    /// Use `.fail_safe_expiry_length_seconds()` and `.max_cumulative_failsafe_seconds()` to access fields.
+    pub async fn read_basic_commissioning_info<'a>(
+        exchange: &'a mut Exchange<'_>,
+    ) -> Result<BasicCommissioningInfo<'a>, Error> {
+        let resp = Self::read_single_attr(
+            exchange,
+            0, // endpoint 0
+            GENERAL_COMMISSIONING_CLUSTER,
+            ATTR_BASIC_COMMISSIONING_INFO,
+            false,
+        )
+        .await?;
+
+        let data = extract_attr_data(&resp)?;
+        Ok(BasicCommissioningInfo::new(data))
+    }
+
+    /// Read the current regulatory configuration from the device.
+    ///
+    /// Returns the regulatory location type that the device is currently
+    /// configured for (Indoor, Outdoor, or IndoorOutdoor).
+    ///
+    /// # Arguments
+    /// - `exchange` - An established exchange (typically PASE session)
+    ///
+    /// # Returns
+    /// The current `RegulatoryLocationTypeEnum` value.
+    pub async fn read_regulatory_config(
+        exchange: &mut Exchange<'_>,
+    ) -> Result<RegulatoryLocationTypeEnum, Error> {
+        let resp = Self::read_single_attr(
+            exchange,
+            0, // endpoint 0
+            GENERAL_COMMISSIONING_CLUSTER,
+            ATTR_REGULATORY_CONFIG,
+            false,
+        )
+        .await?;
+
+        let data = extract_attr_data(&resp)?;
+        RegulatoryLocationTypeEnum::from_tlv(&data)
+    }
+
+    /// Read the location capability of the device.
+    ///
+    /// Returns the regulatory location types that the device supports
+    /// (Indoor, Outdoor, or IndoorOutdoor). This determines what values
+    /// are valid for [`set_regulatory_config`](Self::set_regulatory_config).
+    ///
+    /// # Arguments
+    /// - `exchange` - An established exchange (typically PASE session)
+    ///
+    /// # Returns
+    /// The device's `RegulatoryLocationTypeEnum` capability.
+    pub async fn read_location_capability(
+        exchange: &mut Exchange<'_>,
+    ) -> Result<RegulatoryLocationTypeEnum, Error> {
+        let resp = Self::read_single_attr(
+            exchange,
+            0, // endpoint 0
+            GENERAL_COMMISSIONING_CLUSTER,
+            ATTR_LOCATION_CAPABILITY,
+            false,
+        )
+        .await?;
+
+        let data = extract_attr_data(&resp)?;
+        RegulatoryLocationTypeEnum::from_tlv(&data)
+    }
+
+    /// Read whether the device supports concurrent connections.
+    ///
+    /// When `true`, the device supports simultaneous CASE and PASE sessions,
+    /// allowing the commissioner to establish a CASE session before closing
+    /// the PASE session. When `false`, the commissioner must close the PASE
+    /// session before establishing CASE.
+    ///
+    /// # Arguments
+    /// - `exchange` - An established exchange (typically PASE session)
+    ///
+    /// # Returns
+    /// `true` if the device supports concurrent connections.
+    pub async fn read_supports_concurrent_connection(
+        exchange: &mut Exchange<'_>,
+    ) -> Result<bool, Error> {
+        let resp = Self::read_single_attr(
+            exchange,
+            0, // endpoint 0
+            GENERAL_COMMISSIONING_CLUSTER,
+            ATTR_SUPPORTS_CONCURRENT_CONNECTION,
+            false,
+        )
+        .await?;
+
+        let data = extract_attr_data(&resp)?;
+        data.bool()
+    }
+
+    /// Set the VID Verification Statement for the accessing fabric.
+    ///
+    /// This command updates the VendorID, VID Verification Statement, and/or
+    /// Vendor Verification Signing Certificate (VVSC) associated with the
+    /// fabric on which the command is sent. All fields are optional.
+    ///
+    /// # Arguments
+    /// - `exchange` - An established CASE session with administrator privileges
+    /// - `vendor_id` - Optional vendor ID to set
+    /// - `vid_verification_statement` - Optional VID verification statement (max 85 bytes)
+    /// - `vvsc` - Optional Vendor Verification Signing Certificate (max 400 bytes)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or an error if the command failed.
+    pub async fn set_vid_verification_statement(
+        exchange: &mut Exchange<'_>,
+        vendor_id: Option<u16>,
+        vid_verification_statement: Option<&[u8]>,
+        vvsc: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        let mut buf = [0u8; 512]; // VVSC can be up to 400 bytes
+        let tail = {
+            let wb = WriteBuf::new(&mut buf);
+            let parent = TLVWriteParent::new((), wb);
+
+            let mut parent =
+                SetVIDVerificationStatementRequestBuilder::new(parent, &TLVTag::Anonymous)?
+                    .vendor_id(vendor_id)?
+                    .vid_verification_statement(vid_verification_statement.map(Octets))?
+                    .vvsc(vvsc.map(Octets))?
+                    .end()?;
+
+            parent.writer().get_tail()
+        };
+        let cmd_data = TLVElement::new(&buf[..tail]);
+
+        let resp = Self::invoke_single_cmd(
+            exchange,
+            0, // endpoint 0
+            OPERATIONAL_CREDENTIALS_CLUSTER,
+            CMD_SET_VID_VERIFICATION_STATEMENT,
+            cmd_data,
+            None,
+        )
+        .await?;
+
+        extract_status_success(&resp)
+    }
+
+    /// Request a VID verification signature from the device.
+    ///
+    /// This command asks the device to authenticate the fabric associated with
+    /// the given fabric index by producing a signature over the client challenge.
+    ///
+    /// # Arguments
+    /// - `exchange` - An established CASE session with administrator privileges
+    /// - `fabric_index` - The index of the fabric to verify
+    /// - `client_challenge` - A 32-byte challenge nonce
+    ///
+    /// # Returns
+    /// The response containing the fabric index, fabric binding version, and signature.
+    /// Use `.fabric_index()`, `.fabric_binding_version()`, and `.signature()` to access fields.
+    pub async fn sign_vid_verification_request<'a>(
+        exchange: &'a mut Exchange<'_>,
+        fabric_index: u8,
+        client_challenge: &[u8],
+    ) -> Result<SignVIDVerificationResponse<'a>, Error> {
+        let mut buf = [0u8; 64];
+        let tail = {
+            let wb = WriteBuf::new(&mut buf);
+            let parent = TLVWriteParent::new((), wb);
+
+            let mut parent =
+                SignVIDVerificationRequestRequestBuilder::new(parent, &TLVTag::Anonymous)?
+                    .fabric_index(fabric_index)?
+                    .client_challenge(Octets(client_challenge))?
+                    .end()?;
+
+            parent.writer().get_tail()
+        };
+        let cmd_data = TLVElement::new(&buf[..tail]);
+
+        let resp = Self::invoke_single_cmd(
+            exchange,
+            0, // endpoint 0
+            OPERATIONAL_CREDENTIALS_CLUSTER,
+            CMD_SIGN_VID_VERIFICATION_REQUEST,
+            cmd_data,
+            None,
+        )
+        .await?;
+
+        let data = extract_cmd_data(&resp)?;
+        Ok(SignVIDVerificationResponse::new(data))
     }
 }
