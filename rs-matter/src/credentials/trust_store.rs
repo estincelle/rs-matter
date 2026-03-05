@@ -27,7 +27,7 @@
 //! - [`FileAttestationTrustStore`]: heap-backed, owns DER bytes. Loads PAA certificates
 //!   from a directory of `.der` files at runtime (`std` only).
 
-use crate::cert::x509::X509CertRef;
+use crate::cert::x509::PaaCert;
 use crate::error::{Error, ErrorCode};
 
 const SKID_LEN: usize = 20;
@@ -50,7 +50,7 @@ pub trait AttestationTrustStore {
 
 /// Extract and validate the Subject Key Identifier from a DER-encoded certificate.
 fn extract_skid(cert: &[u8]) -> Result<[u8; SKID_LEN], Error> {
-    X509CertRef::new(cert)?
+    PaaCert::new(cert)?
         .subject_key_id()?
         .try_into()
         .map_err(|_| ErrorCode::InvalidData.into())
