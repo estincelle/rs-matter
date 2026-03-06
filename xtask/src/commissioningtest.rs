@@ -46,6 +46,8 @@ use socket2::{Domain, Protocol, Socket, Type};
 use embassy_futures::select::{select, Either};
 use embassy_time::Timer;
 
+use rs_matter::credentials::attestation_verifier::{AttestationInfo, AttestationVerifier};
+use rs_matter::credentials::trust_store::ArrayAttestationTrustStore;
 use rs_matter::crypto::{default_crypto, Crypto};
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
@@ -83,6 +85,18 @@ const ATTR_ON_OFF: u32 = 0x0000;
 
 /// Toggle command ID
 const CMD_TOGGLE: u32 = 0x0002;
+
+/// PAA certificate for test vendor 0xFFF1 (used by the test device)
+const TEST_PAA_FFF1_CERT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../rs-matter/credentials/Chip-Test-PAA-FFF1-Cert.der"
+));
+
+/// PAA certificate with no VID (development PAA)
+const TEST_PAA_NOVID_CERT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../rs-matter/credentials/Chip-Test-PAA-NoVID-Cert.der"
+));
 
 /// Timeout for PASE handshake in seconds
 const PASE_TIMEOUT_SECS: u64 = 30;
@@ -443,6 +457,10 @@ async fn run_commissioning_flow<C: Crypto>(
     establish_pase_session(matter, crypto, peer_addr, passcode).await?;
     log_session_info(matter);
 
+    // Phase 2.5: Device Attestation Verification
+    info!("=== Phase 2.5: Device Attestation Verification ===");
+    verify_device_attestation(matter, crypto).await?;
+
     // Phase 3: Commissioning Info & Commands
     info!("=== Phase 3: Commissioning Info & Commands ===");
     test_commissioning_commands(matter).await?;
@@ -687,6 +705,116 @@ fn log_session_info(matter: &Matter<'_>) {
             sess.is_encrypted(),
         );
     }
+}
+
+// Phase 2.5: Device Attestation Verification
+// ============================================================================
+
+async fn verify_device_attestation<C: Crypto>(
+    matter: &Matter<'_>,
+    crypto: &C,
+) -> Result<(), Error> {
+    // 1. Get attestation challenge from the PASE session
+    let att_challenge = {
+        let session_mgr = matter.transport_mgr.session_mgr.borrow();
+        let session = session_mgr
+            .iter()
+            .find(|s| s.is_encrypted())
+            .ok_or(rs_matter::error::ErrorCode::InvalidState)?;
+        let challenge_ref = session
+            .get_att_challenge()
+            .ok_or(rs_matter::error::ErrorCode::InvalidState)?;
+        *challenge_ref.access()
+    };
+    info!("Got attestation challenge from PASE session");
+
+    // 2. Generate random attestation nonce (32 bytes)
+    let mut nonce = [0u8; 32];
+    {
+        let mut rng = crypto
+            .rand()
+            .map_err(|_| rs_matter::error::ErrorCode::Invalid)?;
+        rs_matter::crypto::RngCore::fill_bytes(&mut rng, &mut nonce);
+    }
+    info!("Generated attestation nonce");
+
+    // 3. Send AttestationRequest and get response
+    info!("Step 2.5a: Sending AttestationRequest...");
+    let (attestation_elements, attestation_signature) = {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(
+            ImClient::attestation_request(&mut exchange, &nonce),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
+        (
+            resp.attestation_elements()?.to_vec(),
+            resp.attestation_signature()?.to_vec(),
+        )
+    };
+    info!(
+        "Got attestation response: elements={} bytes, signature={} bytes",
+        attestation_elements.len(),
+        attestation_signature.len()
+    );
+
+    // 4. Get DAC certificate
+    info!("Step 2.5b: Requesting DAC certificate...");
+    let dac_der = {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(
+            ImClient::certificate_chain_request(
+                &mut exchange,
+                CertificateChainTypeEnum::DACCertificate,
+            ),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
+        resp.certificate()?.to_vec()
+    };
+    info!("Got DAC certificate: {} bytes", dac_der.len());
+
+    // 5. Get PAI certificate
+    info!("Step 2.5c: Requesting PAI certificate...");
+    let pai_der = {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(
+            ImClient::certificate_chain_request(
+                &mut exchange,
+                CertificateChainTypeEnum::PAICertificate,
+            ),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
+        resp.certificate()?.to_vec()
+    };
+    info!("Got PAI certificate: {} bytes", pai_der.len());
+
+    // 6. Run attestation verification
+    info!("Step 2.5d: Verifying device attestation...");
+    let trust_store =
+        ArrayAttestationTrustStore::<2>::from_certs(&[TEST_PAA_FFF1_CERT, TEST_PAA_NOVID_CERT])?;
+    let verifier = AttestationVerifier::new(
+        crypto,
+        &trust_store,
+        rs_matter::utils::epoch::sys_epoch,
+        true,
+    );
+
+    let info = AttestationInfo {
+        attestation_elements: &attestation_elements,
+        attestation_challenge: &att_challenge,
+        attestation_signature: &attestation_signature,
+        dac_der: &dac_der,
+        pai_der: &pai_der,
+        vendor_id: TEST_DEV_DET.vid,
+        product_id: TEST_DEV_DET.pid,
+    };
+
+    verifier.verify_device_attestation(&info, &nonce)?;
+
+    info!("Device attestation verified successfully!");
+    Ok(())
 }
 
 // ============================================================================
