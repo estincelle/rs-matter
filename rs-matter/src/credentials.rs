@@ -24,6 +24,7 @@
 //!   content validation per Matter Spec Section 6.3.1.
 //! - [`cd_keys`]: Well-known CSA CD signing key trust store.
 
+pub mod attestation_verifier;
 pub mod cd;
 pub mod cd_keys;
 pub mod trust_store;
