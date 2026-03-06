@@ -456,6 +456,7 @@ impl core::fmt::Display for Cluster<'_> {
     }
 }
 
+#[allow(clippy::if_same_then_else)]
 #[cfg(feature = "defmt")]
 impl defmt::Format for Cluster<'_> {
     fn format(&self, f: defmt::Formatter<'_>) {
