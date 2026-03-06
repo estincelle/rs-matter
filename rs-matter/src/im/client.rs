@@ -20,6 +20,7 @@
 //! This module provides client-side functionality for sending IM requests
 //! (Read, Write, Invoke) to Matter devices and processing their responses.
 
+pub mod commissioning;
 pub use super::{AttrId, ClusterId, EndptId};
 
 use crate::error::{Error, ErrorCode};
@@ -141,18 +142,23 @@ impl<'a> InvokeRequestBuilder<'a> {
 pub struct ImClient;
 
 impl ImClient {
-    /// Read attributes from a device.
+    /// Read attributes from a device with full chunking support.
     ///
-    /// Sends a ReadRequest and processes the ReportData response(s). If the
-    /// server's response is too large for a single message, it will be sent
-    /// across multiple chunks with the `more_chunks` flag set. This method
-    /// handles the chunking protocol automatically, invoking the callback
-    /// once per chunk.
+    /// This is the lowest-level read API. It supports wildcard paths and
+    /// handles chunked responses automatically, invoking the callback once
+    /// per chunk.
     ///
-    /// The callback receives a reference to each chunk's `ReportDataResp`.
-    /// Because the exchange's rx buffer is invalidated when sending the
-    /// `StatusResponse` to request the next chunk, callers must extract any
-    /// needed data from the response within the callback.
+    /// # Callback lifetime constraints
+    ///
+    /// The callback receives `&ReportDataResp<'_>` where the lifetime is
+    /// tied to the exchange's RX buffer for the current chunk. Because the
+    /// buffer is invalidated between chunks, **only owned/`Copy` data can
+    /// be extracted** from the callback. Borrowed data (e.g., `TLVElement`,
+    /// byte slices from `AttrData`) cannot escape the callback.
+    ///
+    /// For single-attribute reads where you need zero-copy access to
+    /// borrowed response data, use [`read_single_attr`](Self::read_single_attr)
+    /// instead.
     ///
     /// # Arguments
     /// - `exchange` - An established exchange (PASE or CASE session)
@@ -185,7 +191,7 @@ impl ImClient {
         loop {
             exchange.recv_fetch().await?;
 
-            let (more_chunks, suppress_response) = {
+            let (more_chunks, suppress_response, cb_result) = {
                 let rx = exchange.rx()?;
                 Self::check_opcode(rx.meta().proto_opcode, OpCode::ReportData)?;
 
@@ -196,12 +202,19 @@ impl ImClient {
                 let suppress = resp.suppress_response.unwrap_or(false);
 
                 // Invoke callback while the rx buffer is still valid
-                on_report(&resp)?;
+                let cb_result = on_report(&resp);
 
-                (more, suppress)
+                (more, suppress, cb_result)
             };
 
             if more_chunks {
+                // If the callback failed, abort the chunked transaction by
+                // sending StatusResponse(Failure) so the server stops sending.
+                if let Err(e) = cb_result {
+                    Self::send_abort(exchange).await?;
+                    return Err(e);
+                }
+
                 // Send StatusResponse to request the next chunk.
                 // This clears the rx buffer.
                 debug!("ImClient::read - more_chunks=true, sending StatusResponse for next chunk");
@@ -212,7 +225,9 @@ impl ImClient {
                     })
                     .await?;
             } else {
-                // Final chunk
+                // Final chunk — propagate callback error after completing the exchange.
+                cb_result?;
+
                 if !suppress_response {
                     debug!("ImClient::read - final chunk, sending StatusResponse");
                     exchange
@@ -232,22 +247,27 @@ impl ImClient {
         Ok(())
     }
 
-    /// Invoke a command on a device.
+    /// Invoke one or more commands on a device with full chunking support.
     ///
-    /// Sends an InvokeRequest and processes the InvokeResponse(s). If the
-    /// server's response is too large for a single message, it will be sent
-    /// across multiple chunks with the `more_chunks` flag set. This method
-    /// handles the chunking protocol automatically, invoking the callback
-    /// once per chunk.
+    /// This is the lowest-level invoke API. It supports multiple commands per
+    /// request and handles chunked responses automatically, invoking the
+    /// callback once per chunk.
     ///
-    /// The callback receives a reference to each chunk's `InvokeResp`.
-    /// Because the exchange's rx buffer is invalidated when sending the
-    /// `StatusResponse` to request the next chunk, callers must extract any
-    /// needed data from the response within the callback.
+    /// # Callback lifetime constraints
+    ///
+    /// The callback receives `&InvokeResp<'_>` where the lifetime is tied to
+    /// the exchange's RX buffer for the current chunk. Because the buffer is
+    /// invalidated between chunks, **only owned/`Copy` data can be extracted**
+    /// from the callback. Borrowed data (e.g., `TLVElement`, byte slices)
+    /// cannot escape the callback.
+    ///
+    /// For single-command invocations where you need zero-copy access to
+    /// borrowed response data, use [`invoke_single_cmd`](Self::invoke_single_cmd)
+    /// instead.
     ///
     /// # Arguments
     /// - `exchange` - An established exchange (PASE or CASE session)
-    /// - `cmd_data` - Command data to invoke
+    /// - `cmd_data` - One or more commands to invoke
     /// - `timed_timeout_ms` - Optional timeout for timed invoke (required for some commands)
     /// - `on_response` - Callback invoked for each InvokeResponse chunk
     pub async fn invoke<F>(
@@ -281,7 +301,7 @@ impl ImClient {
         loop {
             exchange.recv_fetch().await?;
 
-            let (more_chunks, suppress_response) = {
+            let (more_chunks, suppress_response, cb_result) = {
                 let rx = exchange.rx()?;
                 Self::check_opcode(rx.meta().proto_opcode, OpCode::InvokeResponse)?;
 
@@ -292,15 +312,23 @@ impl ImClient {
                 let suppress = resp.suppress_response.unwrap_or(false);
 
                 // Invoke callback while the rx buffer is still valid
-                on_response(&resp)?;
+                let cb_result = on_response(&resp);
 
-                (more, suppress)
+                (more, suppress, cb_result)
             };
 
             if more_chunks {
                 // Spec forbids suppress_response=true with more_chunks=true
                 if suppress_response {
+                    Self::send_abort(exchange).await?;
                     return Err(ErrorCode::InvalidData.into());
+                }
+
+                // If the callback failed, abort the chunked transaction by
+                // sending StatusResponse(Failure) so the server stops sending.
+                if let Err(e) = cb_result {
+                    Self::send_abort(exchange).await?;
+                    return Err(e);
                 }
 
                 // Send StatusResponse to request the next chunk.
@@ -315,11 +343,21 @@ impl ImClient {
                     })
                     .await?;
             } else {
-                // Final chunk — send standalone ACK for MRP completion.
-                // Unlike ReportData, InvokeResponse does not use StatusResponse
-                // on the final chunk; the client just ACKs and closes.
-                debug!("ImClient::invoke - final chunk, sending standalone ACK");
-                exchange.acknowledge().await?;
+                // Final chunk — propagate callback error after completing the exchange.
+                cb_result?;
+
+                if !suppress_response {
+                    debug!("ImClient::invoke - final chunk, sending StatusResponse");
+                    exchange
+                        .send_with(|_, wb| {
+                            StatusResp::write(wb, IMStatusCode::Success)?;
+                            Ok(Some(OpCode::StatusResponse.into()))
+                        })
+                        .await?;
+                } else {
+                    debug!("ImClient::invoke - final chunk, sending standalone ACK");
+                    exchange.acknowledge().await?;
+                }
                 break;
             }
         }
@@ -400,7 +438,11 @@ impl ImClient {
         let status_resp = StatusResp::from_tlv(&TLVElement::new(rx.payload()))?;
         if status_resp.status != IMStatusCode::Success {
             error!("TimedRequest failed with status: {:?}", status_resp.status);
-            return Err(ErrorCode::InvalidData.into());
+            return Err(status_resp
+                .status
+                .to_error_code()
+                .unwrap_or(ErrorCode::Failure)
+                .into());
         }
 
         Ok(())
@@ -418,16 +460,40 @@ impl ImClient {
             Ok(())
         }
     }
+
+    /// Abort a chunked transaction by sending `StatusResponse(Failure)`.
+    ///
+    /// This tells the server we are not continuing the transaction, preventing
+    /// it from waiting indefinitely for the next `StatusResponse(Success)`.
+    async fn send_abort(exchange: &mut Exchange<'_>) -> Result<(), Error> {
+        exchange
+            .send_with(|_, wb| {
+                StatusResp::write(wb, IMStatusCode::Failure)?;
+                Ok(Some(OpCode::StatusResponse.into()))
+            })
+            .await
+    }
 }
 
 /// Extension methods for easier single-item operations
 impl ImClient {
-    /// Read a single attribute from a device.
+    /// Read a single attribute and extract an owned value via callback.
     ///
-    /// This is a convenience method that wraps `read()` for the common case
-    /// of reading a single attribute. The callback receives the first
-    /// `AttrResp` found across all chunks and should extract the needed
-    /// data from it.
+    /// Convenience wrapper around [`read`](Self::read) for the common case
+    /// of reading one attribute and extracting a single value from the
+    /// response. The callback receives the first `AttrResp` and should
+    /// return the extracted data.
+    ///
+    /// # Callback lifetime constraints
+    ///
+    /// The same lifetime constraints as [`read`](Self::read) apply: the
+    /// callback's `AttrResp<'_>` borrows from a transient RX buffer, so
+    /// only owned/`Copy` types can be returned as `T`. Returning borrowed
+    /// types like `TLVElement<'_>` will not compile.
+    ///
+    /// For single-attribute reads where you need zero-copy access to the
+    /// response's `TLVElement` data, use
+    /// [`read_single_attr`](Self::read_single_attr) instead.
     ///
     /// # Returns
     /// The value returned by the callback, or an error if no attribute
@@ -475,12 +541,23 @@ impl ImClient {
         result.unwrap_or(Err(ErrorCode::InvalidData.into()))
     }
 
-    /// Invoke a single command on a device.
+    /// Invoke a single command and extract an owned value via callback.
     ///
-    /// This is a convenience method that wraps `invoke()` for the common case
-    /// of invoking a single command. The callback receives the first
-    /// `CmdResp` found across all chunks and should extract the needed
-    /// data from it.
+    /// Convenience wrapper around [`invoke`](Self::invoke) for the common case
+    /// of sending one command and extracting a single value from the response.
+    /// The callback receives the first `CmdResp` and should return the
+    /// extracted data.
+    ///
+    /// # Callback lifetime constraints
+    ///
+    /// The same lifetime constraints as [`invoke`](Self::invoke) apply: the
+    /// callback's `CmdResp<'_>` borrows from a transient RX buffer, so
+    /// only owned/`Copy` types can be returned as `T`. Returning borrowed
+    /// types like `TLVElement<'_>` will not compile.
+    ///
+    /// For single-command invocations where you need zero-copy access to
+    /// the response's `TLVElement` data, use
+    /// [`invoke_single_cmd`](Self::invoke_single_cmd) instead.
     ///
     /// # Returns
     /// The value returned by the callback, or an error if no command
@@ -495,7 +572,7 @@ impl ImClient {
         on_resp: F,
     ) -> Result<T, Error>
     where
-        F: FnOnce(&CmdResp<'_>) -> Result<T, Error>,
+        F: FnOnce(CmdResp<'_>) -> Result<T, Error>,
     {
         let path = CmdPath {
             endpoint: Some(endpoint),
@@ -517,7 +594,7 @@ impl ImClient {
                     if let Some(cmd_resp) = invoke_responses.iter().next() {
                         if let Some(cb) = on_resp.take() {
                             match cmd_resp {
-                                Ok(resp) => result = Some(cb(&resp)),
+                                Ok(resp) => result = Some(cb(resp)),
                                 Err(_) => {
                                     result = Some(Err(ErrorCode::InvalidData.into()));
                                 }
@@ -531,6 +608,214 @@ impl ImClient {
         .await?;
 
         result.unwrap_or(Err(ErrorCode::InvalidData.into()))
+    }
+
+    /// Invoke a single command and return the response with zero-copy access.
+    ///
+    /// Unlike [`invoke_single`](Self::invoke_single), this method does not use
+    /// a callback. Instead, it returns the `CmdResp` directly, with its
+    /// `TLVElement` data borrowing from the exchange's RX buffer. This enables
+    /// zero-copy access to response fields without the lifetime constraints
+    /// imposed by the callback pattern.
+    ///
+    /// This method follows the same pattern as [`write`](Self::write):
+    /// after receiving the response, it sends a standalone ACK (which preserves
+    /// the RX buffer) and then parses the response from the still-valid buffer.
+    ///
+    /// # Limitations
+    ///
+    /// This method does **not** support chunked responses. If the server
+    /// responds with `more_chunks=true`, an error is returned. In practice
+    /// this does not occur for single-command requests; if you need chunked
+    /// response handling, use [`invoke`](Self::invoke) directly.
+    ///
+    /// **Note:** When the server sets `suppress_response=false` (the default
+    /// for InvokeResponse), the spec requires the client to send
+    /// `StatusResponse(Success)`. However, sending a StatusResponse clears
+    /// the RX buffer, which would break zero-copy access. This method
+    /// sends a standalone ACK instead, which completes the MRP-layer
+    /// exchange but deviates from the IM-layer spec requirement. In
+    /// practice this works because servers clean up the exchange on timeout.
+    /// If strict spec compliance is required, use
+    /// [`invoke_single`](Self::invoke_single) with a callback.
+    ///
+    /// The exchange remains borrowed for the lifetime of the returned
+    /// `CmdResp`, since the response data points into the exchange's RX
+    /// buffer.
+    ///
+    /// # Returns
+    /// The first `CmdResp` from the invoke response, or an error if no
+    /// response was found, the invoke failed, or chunking was encountered.
+    pub async fn invoke_single_cmd<'a>(
+        exchange: &'a mut Exchange<'_>,
+        endpoint: EndptId,
+        cluster: ClusterId,
+        cmd: u32,
+        cmd_data: TLVElement<'_>,
+        timed_timeout_ms: Option<u16>,
+    ) -> Result<CmdResp<'a>, Error> {
+        // If timed, send TimedRequest first
+        if let Some(timeout_ms) = timed_timeout_ms {
+            Self::send_timed_request(exchange, timeout_ms).await?;
+        }
+
+        let path = CmdPath {
+            endpoint: Some(endpoint),
+            cluster: Some(cluster),
+            cmd: Some(cmd),
+        };
+
+        let cmd_data = [CmdData {
+            path,
+            data: cmd_data,
+        }];
+
+        let req = InvokeRequestBuilder::new(&cmd_data, timed_timeout_ms.is_some());
+
+        exchange
+            .send_with(|_, wb| {
+                req.to_tlv(&TagType::Anonymous, wb)?;
+                Ok(Some(OpCode::InvokeRequest.into()))
+            })
+            .await?;
+
+        exchange.recv_fetch().await?;
+
+        // Check opcode and more_chunks before acknowledging
+        {
+            let rx = exchange.rx()?;
+            Self::check_opcode(rx.meta().proto_opcode, OpCode::InvokeResponse)?;
+
+            let element = TLVElement::new(rx.payload());
+            let resp = InvokeResp::from_tlv(&element)?;
+
+            if resp.more_chunks.unwrap_or(false) {
+                Self::send_abort(exchange).await?;
+                return Err(ErrorCode::InvalidData.into());
+            }
+        }
+
+        // Send ACK — this preserves the RX buffer (unlike send_with which clears it).
+        // See doc comment on suppress_response handling above.
+        exchange.acknowledge().await?;
+
+        // Parse response from the still-valid RX buffer
+        let rx = exchange.rx()?;
+        let element = TLVElement::new(rx.payload());
+        let resp = InvokeResp::from_tlv(&element)?;
+
+        resp.invoke_responses
+            .as_ref()
+            .and_then(|responses| responses.iter().next())
+            .ok_or(Error::from(ErrorCode::InvalidData))?
+            .map_err(|_| Error::from(ErrorCode::InvalidData))
+    }
+
+    /// Read a single attribute and return the response with zero-copy access.
+    ///
+    /// Unlike [`read_single`](Self::read_single), this method does not use a
+    /// callback. Instead, it returns the `AttrResp` directly, with its
+    /// `TLVElement` data borrowing from the exchange's RX buffer. This enables
+    /// zero-copy access to attribute data without the lifetime constraints
+    /// imposed by the callback pattern.
+    ///
+    /// This method follows the same pattern as [`write`](Self::write) and
+    /// [`invoke_single_cmd`](Self::invoke_single_cmd): after receiving the
+    /// response, it sends a standalone ACK (which preserves the RX buffer)
+    /// and then parses the response from the still-valid buffer.
+    ///
+    /// # Limitations
+    ///
+    /// This method does **not** support chunked responses. If the server
+    /// responds with `more_chunks=true`, an error is returned. For wildcard
+    /// reads or large responses that may be chunked, use
+    /// [`read`](Self::read) directly.
+    ///
+    /// This method requires the server to set `suppress_response=true` on
+    /// the final ReportData chunk. This is standard behavior for
+    /// non-subscription reads per the Matter specification. If the server
+    /// sets `suppress_response=false`, the exchange is completed with
+    /// `StatusResponse(Success)` and an error is returned; use
+    /// [`read_single`](Self::read_single) with a callback for that case.
+    ///
+    /// The exchange remains borrowed for the lifetime of the returned
+    /// `AttrResp`, since the response data points into the exchange's RX
+    /// buffer.
+    ///
+    /// # Returns
+    /// The first `AttrResp` from the report data, or an error if no
+    /// attribute response was found, the read failed, chunking was
+    /// encountered, or `suppress_response` was false.
+    pub async fn read_single_attr<'a>(
+        exchange: &'a mut Exchange<'_>,
+        endpoint: EndptId,
+        cluster: ClusterId,
+        attr: AttrId,
+        fabric_filtered: bool,
+    ) -> Result<AttrResp<'a>, Error> {
+        let path = AttrPath {
+            endpoint: Some(endpoint),
+            cluster: Some(cluster),
+            attr: Some(attr),
+            ..Default::default()
+        };
+
+        let paths = [path];
+        let req = ReadRequestBuilder::attributes(&paths, fabric_filtered);
+
+        exchange
+            .send_with(|_, wb| {
+                req.to_tlv(&TagType::Anonymous, wb)?;
+                Ok(Some(OpCode::ReadRequest.into()))
+            })
+            .await?;
+
+        exchange.recv_fetch().await?;
+
+        // Check opcode and response flags before acknowledging
+        let suppress_response = {
+            let rx = exchange.rx()?;
+            Self::check_opcode(rx.meta().proto_opcode, OpCode::ReportData)?;
+
+            let element = TLVElement::new(rx.payload());
+            let resp = ReportDataResp::from_tlv(&element)?;
+
+            if resp.more_chunks.unwrap_or(false) {
+                Self::send_abort(exchange).await?;
+                return Err(ErrorCode::InvalidData.into());
+            }
+
+            resp.suppress_response.unwrap_or(false)
+        };
+
+        if !suppress_response {
+            // suppress_response=false means the server expects a StatusResponse,
+            // which requires send_with() and clears the RX buffer, making
+            // zero-copy return impossible. Complete the exchange properly,
+            // then return an error. Use read_single() with a callback for
+            // the suppress_response=false case.
+            exchange
+                .send_with(|_, wb| {
+                    StatusResp::write(wb, IMStatusCode::Success)?;
+                    Ok(Some(OpCode::StatusResponse.into()))
+                })
+                .await?;
+            return Err(ErrorCode::InvalidData.into());
+        }
+
+        // suppress_response=true: send standalone ACK (preserves RX buffer)
+        exchange.acknowledge().await?;
+
+        // Parse response from the still-valid RX buffer
+        let rx = exchange.rx()?;
+        let element = TLVElement::new(rx.payload());
+        let resp = ReportDataResp::from_tlv(&element)?;
+
+        resp.attr_reports
+            .as_ref()
+            .and_then(|reports| reports.iter().next())
+            .ok_or(Error::from(ErrorCode::InvalidData))?
+            .map_err(|_| Error::from(ErrorCode::InvalidData))
     }
 }
 
