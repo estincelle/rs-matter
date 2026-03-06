@@ -92,6 +92,7 @@ impl From<ErrorCode> for IMStatusCode {
             ErrorCode::DataVersionMismatch => IMStatusCode::DataVersionMismatch,
             ErrorCode::ResourceExhausted => IMStatusCode::ResourceExhausted,
             ErrorCode::FailSafeRequired => IMStatusCode::FailSafeRequired,
+            ErrorCode::NeedsTimedInteraction => IMStatusCode::NeedsTimedInteraction,
             ErrorCode::ConstraintError => IMStatusCode::ConstraintError,
             ErrorCode::Failure => IMStatusCode::Failure,
             _ => IMStatusCode::Failure,
@@ -125,7 +126,7 @@ impl IMStatusCode {
             Self::Busy => Some(ErrorCode::Busy),
             Self::UnsupportedEndpoint => Some(ErrorCode::EndpointNotFound),
             Self::UnsupportedCluster => Some(ErrorCode::ClusterNotFound),
-            Self::NeedsTimedInteraction => Some(ErrorCode::InvalidAction),
+            Self::NeedsTimedInteraction => Some(ErrorCode::NeedsTimedInteraction),
             Self::FailSafeRequired => Some(ErrorCode::FailSafeRequired),
             _ => Some(ErrorCode::Failure),
         }
