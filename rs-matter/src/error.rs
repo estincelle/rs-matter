@@ -111,6 +111,21 @@ pub enum ErrorCode {
     CdInvalidVendorId,
     CdInvalidProductId,
     CdInvalidPaa,
+    // Device Attestation errors
+    AttPaaNotFound,
+    AttPaaFormatInvalid,
+    AttPaiMissing,
+    AttPaiFormatInvalid,
+    AttPaiVendorIdMismatch,
+    AttDacFormatInvalid,
+    AttDacVendorIdMismatch,
+    AttDacProductIdMismatch,
+    AttDacExpired,
+    AttChainInvalid,
+    AttSignatureInvalid,
+    AttSignatureInvalidFormat,
+    AttElementsMalformed,
+    AttNonceMismatch,
 }
 
 impl From<ErrorCode> for Error {
