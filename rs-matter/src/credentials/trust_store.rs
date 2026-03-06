@@ -379,12 +379,25 @@ mod std_tests {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
 
-        for entry in std::fs::read_dir(TEST_DATA_DIR).unwrap() {
-            let entry = entry.unwrap();
-            std::fs::copy(entry.path(), path.join(entry.file_name())).unwrap();
-        }
+        copy_dir_recursive(TEST_DATA_DIR.as_ref(), &path);
 
         TempDir(path)
+    }
+
+    /// Recursively copy all files and subdirectories from `src` to `dst`.
+    /// Skips symlinks and other special entries.
+    fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let ft = entry.file_type().unwrap();
+            let dest_path = dst.join(entry.file_name());
+            if ft.is_dir() {
+                std::fs::create_dir_all(&dest_path).unwrap();
+                copy_dir_recursive(&entry.path(), &dest_path);
+            } else if ft.is_file() {
+                std::fs::copy(entry.path(), dest_path).unwrap();
+            }
+        }
     }
 
     /// Create an empty temp directory.
