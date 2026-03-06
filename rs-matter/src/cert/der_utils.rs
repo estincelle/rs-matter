@@ -24,7 +24,7 @@
 use crate::crypto::{PKC_CANON_SECRET_KEY_LEN, PKC_SIGNATURE_LEN};
 use crate::error::{Error, ErrorCode};
 use der::asn1::AnyRef;
-use der::{Decode, Header, SliceReader, Tag, Tagged};
+use der::{Decode, Header, Reader, SliceReader, Tag, Tagged};
 
 /// P-256 field element length in bytes (ECDSA signature r and s values).
 const P256_FE_LEN: usize = PKC_CANON_SECRET_KEY_LEN;
@@ -123,6 +123,70 @@ pub fn copy_integer_to_fixed(target: &mut [u8], integer: &[u8]) -> Result<(), Er
     Ok(())
 }
 
+/// Open a DER-encoded X.509 certificate and return a reader positioned
+/// after the outer SEQUENCE header.
+fn open_cert_sequence(cert_der: &[u8]) -> Result<SliceReader<'_>, Error> {
+    let mut reader = SliceReader::new(cert_der).map_err(|_| Error::from(ErrorCode::Invalid))?;
+    let outer_header = Header::decode(&mut reader).map_err(|_| Error::from(ErrorCode::Invalid))?;
+    if outer_header.tag != Tag::Sequence {
+        return Err(ErrorCode::Invalid.into());
+    }
+    Ok(reader)
+}
+
+/// Extract the raw TBS (To-Be-Signed) certificate bytes from a DER-encoded X.509 certificate.
+///
+/// Certificate ::= SEQUENCE { tbsCertificate SEQUENCE {...}, signatureAlgorithm, signatureValue }
+///
+/// Returns the complete TBS SEQUENCE including its tag and length header.
+/// This is the data that the issuer's signature covers.
+pub fn tbs_certificate_raw(cert_der: &[u8]) -> Result<&[u8], Error> {
+    let mut reader = open_cert_sequence(cert_der)?;
+
+    let before_tbs: usize = reader
+        .position()
+        .try_into()
+        .map_err(|_| Error::from(ErrorCode::Invalid))?;
+
+    // Skip TBS SEQUENCE (reads its header + content)
+    AnyRef::decode(&mut reader).map_err(|_| Error::from(ErrorCode::Invalid))?;
+
+    let after_tbs: usize = reader
+        .position()
+        .try_into()
+        .map_err(|_| Error::from(ErrorCode::Invalid))?;
+
+    Ok(&cert_der[before_tbs..after_tbs])
+}
+
+/// Extract the signature from a DER-encoded X.509 certificate as raw r||s (64 bytes).
+///
+/// Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue BIT STRING }
+///
+/// The BIT STRING contains a DER-encoded ECDSA signature which is converted to raw format.
+pub fn cert_signature_raw(cert_der: &[u8]) -> Result<[u8; RAW_SIGNATURE_LEN], Error> {
+    let mut reader = open_cert_sequence(cert_der)?;
+
+    // Skip tbsCertificate + signatureAlgorithm
+    AnyRef::decode(&mut reader).map_err(|_| Error::from(ErrorCode::Invalid))?;
+    AnyRef::decode(&mut reader).map_err(|_| Error::from(ErrorCode::Invalid))?;
+
+    // Read signatureValue BIT STRING
+    let sig_any = AnyRef::decode(&mut reader).map_err(|_| Error::from(ErrorCode::Invalid))?;
+    if sig_any.tag() != Tag::BitString {
+        return Err(ErrorCode::Invalid.into());
+    }
+
+    let bs_value = sig_any.value();
+    // BIT STRING has unused-bits prefix byte (must be 0 for byte-aligned signatures)
+    if bs_value.is_empty() || bs_value[0] != 0x00 {
+        return Err(ErrorCode::Invalid.into());
+    }
+
+    // The remaining bytes are the DER-encoded ECDSA signature
+    ecdsa_der_to_raw(&bs_value[1..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +283,37 @@ mod tests {
 
         let result = copy_integer_to_fixed(&mut target, &integer);
         assert!(result.is_err());
+    }
+
+    // Use the built-in test DAC certificate from TEST_DEV_ATT
+    use crate::dm::clusters::dev_att::DeviceAttestation;
+    use crate::dm::devices::test::TEST_DEV_ATT;
+
+    #[test]
+    fn test_tbs_certificate_raw() {
+        let cert = TEST_DEV_ATT.dac();
+        let tbs = tbs_certificate_raw(cert).unwrap();
+        // TBS must start with SEQUENCE tag
+        assert_eq!(tbs[0], 0x30);
+        // TBS is a strict subset of the full cert (excludes signatureAlgorithm + signatureValue)
+        assert!(tbs.len() < cert.len());
+        // TBS bytes must appear contiguously within the cert
+        let offset = cert.windows(tbs.len()).position(|w| w == tbs);
+        assert!(offset.is_some());
+    }
+
+    #[test]
+    fn test_cert_signature_raw() {
+        // Expected raw r||s extracted from TEST_DEV_ATT DAC cert
+        // (DER INTEGER values with leading 0x00 padding stripped, right-aligned to 32 bytes)
+        const EXPECTED_SIG: [u8; RAW_SIGNATURE_LEN] = [
+            0x46, 0x86, 0x81, 0x07, 0x33, 0xbf, 0x0d, 0xc8, 0xff, 0x4c, 0xb5, 0x14, 0x5a, 0x6b,
+            0xfa, 0x1a, 0xec, 0xff, 0xa8, 0xb6, 0xda, 0xb6, 0xc3, 0x51, 0xaa, 0xee, 0xcd, 0xaf,
+            0xb8, 0xbe, 0x95, 0x7d, 0xe8, 0xc2, 0x8d, 0x6b, 0xfc, 0xc8, 0x7a, 0x7d, 0x54, 0x2e,
+            0xad, 0x6e, 0xda, 0xca, 0x14, 0x8d, 0x5f, 0xa5, 0x06, 0x1e, 0x51, 0x7c, 0xbe, 0x4f,
+            0x24, 0xa7, 0x20, 0xe1, 0xc0, 0x59, 0xde, 0x1a,
+        ];
+        let sig = cert_signature_raw(TEST_DEV_ATT.dac()).unwrap();
+        assert_eq!(sig, EXPECTED_SIG);
     }
 }
