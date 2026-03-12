@@ -25,6 +25,8 @@
 //! Identifier (SKID), Authority Key Identifier (AKID), public key, Matter Vendor ID,
 //! Matter Product ID, and validity periods.
 
+use super::der_utils;
+use crate::crypto::PKC_SIGNATURE_LEN;
 use crate::error::{Error, ErrorCode};
 
 use der::asn1::{
@@ -1002,6 +1004,10 @@ fn time_to_unix_secs(time: &Time) -> Result<u64, Error> {
 /// ```
 pub struct X509Cert<'a, E: CertType<'a>> {
     cert: Certificate<'a, E>,
+    /// Raw TBS (To-Be-Signed) certificate bytes.
+    tbs_raw: &'a [u8],
+    /// Certificate signature in raw r||s format (64 bytes).
+    signature_raw: [u8; PKC_SIGNATURE_LEN],
 }
 
 impl<'a, E: CertType<'a>> X509Cert<'a, E> {
@@ -1011,8 +1017,28 @@ impl<'a, E: CertType<'a>> X509Cert<'a, E> {
     /// extensions for the certificate type E.
     pub fn new(data: &'a [u8]) -> Result<Self, Error> {
         let cert = Certificate::from_der(data).map_err(|_| ErrorCode::InvalidData)?;
+        let tbs_raw = der_utils::tbs_certificate_raw(data).map_err(|_| ErrorCode::InvalidData)?;
+        let signature_raw =
+            der_utils::cert_signature_raw(data).map_err(|_| ErrorCode::InvalidData)?;
 
-        Ok(Self { cert })
+        Ok(Self {
+            cert,
+            tbs_raw,
+            signature_raw,
+        })
+    }
+
+    /// Raw TBS (To-Be-Signed) certificate bytes.
+    ///
+    /// This is the data that the issuer's signature covers, including
+    /// the SEQUENCE tag and length header.
+    pub fn tbs_raw(&self) -> &'a [u8] {
+        self.tbs_raw
+    }
+
+    /// Certificate signature in raw r||s format (64 bytes).
+    pub fn signature_raw(&self) -> &[u8; PKC_SIGNATURE_LEN] {
+        &self.signature_raw
     }
 
     /// Extract the Subject Key Identifier extension value.
