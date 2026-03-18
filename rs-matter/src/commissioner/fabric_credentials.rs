@@ -57,21 +57,24 @@ pub struct DeviceCredentials {
 ///
 /// ```ignore
 /// // Create new fabric credentials
-/// let mut creds = FabricCredentials::new(&crypto, fabric_id)?;
+/// let mut fabric_creds = FabricCredentials::new(&crypto, fabric_id)?;
 ///
-/// // Commission a device
-/// let csr = device.csr_request(&crypto, nonce)?;
-/// let device_creds = creds.generate_device_credentials(&crypto, &csr, &[])?;
+/// // After PASE session is established, request a CSR from the device
+/// let csr = im_client.csr_request(&mut exchange, &nonce, false).await?;
 ///
-/// // Use device_creds with AddNOC command
-/// device.add_noc(
-///     device_creds.noc,
-///     device_creds.icac,
-///     device_creds.ipk,
+/// // Generate credentials for the device
+/// let device_creds = fabric_creds.generate_device_credentials(&crypto, &csr, &[])?;
+///
+/// // Provision the device with the credentials
+/// im_client.add_trusted_root_certificate(&mut exchange, &device_creds.root_cert).await?;
+/// im_client.add_noc(
+///     &mut exchange,
+///     &device_creds.noc,
+///     device_creds.icac.as_deref(),
+///     &device_creds.ipk,
 ///     admin_subject,
-///     vendor_id
-/// )?;
-/// device.add_trusted_root_certificate(device_creds.root_cert)?;
+///     vendor_id,
+/// ).await?;
 /// ```
 pub struct FabricCredentials {
     /// NOC generator for this fabric
