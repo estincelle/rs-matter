@@ -141,6 +141,65 @@ impl<'a> InvokeRequestBuilder<'a> {
 /// ```
 pub struct ImClient;
 
+/// Extract the attribute data from an AttrResp, returning an error if it's a status-only response.
+///
+/// When the server returns a status instead of attribute data, the IM status code
+/// is mapped to the most appropriate [`ErrorCode`] variant.
+pub fn extract_attr_data<'a>(resp: &AttrResp<'a>) -> Result<TLVElement<'a>, Error> {
+    match resp {
+        AttrResp::Data(attr_data) => Ok(attr_data.data.clone()),
+        AttrResp::Status(status) => {
+            let im_status = status.status.status;
+            error!("Attribute read failed with IM status: {:?}", im_status);
+            Err(im_status
+                .to_error_code()
+                .unwrap_or(ErrorCode::Failure)
+                .into())
+        }
+    }
+}
+
+/// Extract a success status from a CmdResp for commands that return `DefaultSuccess`.
+///
+/// These commands have no response data — a successful invocation comes back as
+/// `CmdResp::Status` with `IMStatusCode::Success`.
+pub fn extract_status_success(resp: &CmdResp<'_>) -> Result<(), Error> {
+    match resp {
+        CmdResp::Status(status) => {
+            let im_status = status.status.status;
+            match im_status.to_error_code() {
+                None => Ok(()), // Success
+                Some(error_code) => {
+                    error!("Command failed with IM status: {:?}", im_status);
+                    Err(error_code.into())
+                }
+            }
+        }
+        // Server sent command data for a DefaultSuccess command — unexpected but not an error
+        CmdResp::Cmd(_) => Ok(()),
+    }
+}
+
+/// Extract the command response data from a CmdResp, returning an error if it's a status-only response.
+///
+/// When the server returns a status instead of command data, the IM status code
+/// is mapped to the most appropriate [`ErrorCode`] variant (e.g.,
+/// `UnsupportedCommand` → [`ErrorCode::CommandNotFound`],
+/// `ConstraintError` → [`ErrorCode::ConstraintError`]).
+pub fn extract_cmd_data<'a>(resp: &CmdResp<'a>) -> Result<TLVElement<'a>, Error> {
+    match resp {
+        CmdResp::Cmd(cmd_data) => Ok(cmd_data.data.clone()),
+        CmdResp::Status(status) => {
+            let im_status = status.status.status;
+            error!("Command failed with IM status: {:?}", im_status);
+            Err(im_status
+                .to_error_code()
+                .unwrap_or(ErrorCode::Failure)
+                .into())
+        }
+    }
+}
+
 impl ImClient {
     /// Read attributes from a device with full chunking support.
     ///

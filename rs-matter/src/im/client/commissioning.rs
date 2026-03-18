@@ -56,7 +56,7 @@ use crate::tlv::{FromTLV, Octets, TLVBuilderParent, TLVElement, TLVTag, TLVWrite
 use crate::transport::exchange::Exchange;
 use crate::utils::storage::WriteBuf;
 
-use super::{AttrResp, CmdResp, ImClient};
+use super::ImClient;
 
 // General Commissioning types
 pub use crate::dm::clusters::decl::general_commissioning::{
@@ -151,65 +151,7 @@ const ATTR_REGULATORY_CONFIG: u32 = 0x02;
 const ATTR_LOCATION_CAPABILITY: u32 = 0x03;
 const ATTR_SUPPORTS_CONCURRENT_CONNECTION: u32 = 0x04;
 
-/// Extract the attribute data from an AttrResp, returning an error if it's a status-only response.
-fn extract_attr_data<'a>(resp: &AttrResp<'a>) -> Result<TLVElement<'a>, Error> {
-    match resp {
-        AttrResp::Data(attr_data) => Ok(attr_data.data.clone()),
-        AttrResp::Status(status) => {
-            let im_status = status.status.status;
-            error!("Attribute read failed with IM status: {:?}", im_status);
-            // Safe to unwrap: this arm only matches non-Success statuses
-            // (a successful read always produces AttrResp::Data)
-            Err(im_status
-                .to_error_code()
-                .unwrap_or(ErrorCode::Failure)
-                .into())
-        }
-    }
-}
-
-/// Extract a success status from a CmdResp for commands that return `DefaultSuccess`.
-///
-/// These commands have no response data — a successful invocation comes back as
-/// `CmdResp::Status` with `IMStatusCode::Success`.
-fn extract_status_success(resp: &CmdResp<'_>) -> Result<(), Error> {
-    match resp {
-        CmdResp::Status(status) => {
-            let im_status = status.status.status;
-            match im_status.to_error_code() {
-                None => Ok(()), // Success
-                Some(error_code) => {
-                    error!("Command failed with IM status: {:?}", im_status);
-                    Err(error_code.into())
-                }
-            }
-        }
-        // Server sent command data for a DefaultSuccess command — unexpected but not an error
-        CmdResp::Cmd(_) => Ok(()),
-    }
-}
-
-/// Extract the command response data from a CmdResp, returning an error if it's a status-only response.
-///
-/// When the server returns a status instead of command data, the IM status code
-/// is mapped to the most appropriate [`ErrorCode`] variant (e.g.,
-/// `UnsupportedCommand` → [`ErrorCode::CommandNotFound`],
-/// `ConstraintError` → [`ErrorCode::ConstraintError`]).
-fn extract_cmd_data<'a>(resp: &CmdResp<'a>) -> Result<TLVElement<'a>, Error> {
-    match resp {
-        CmdResp::Cmd(cmd_data) => Ok(cmd_data.data.clone()),
-        CmdResp::Status(status) => {
-            let im_status = status.status.status;
-            error!("Command failed with IM status: {:?}", im_status);
-            // This function is only used for commands that return response data.
-            // A Status-only response for such commands always indicates failure.
-            Err(im_status
-                .to_error_code()
-                .unwrap_or(ErrorCode::Failure)
-                .into())
-        }
-    }
-}
+use super::{extract_attr_data, extract_cmd_data, extract_status_success};
 
 impl ImClient {
     /// Arm or extend the fail-safe timer on the device.
