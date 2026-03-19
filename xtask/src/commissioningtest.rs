@@ -46,6 +46,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use embassy_futures::select::{select, Either};
 use embassy_time::Timer;
 
+use rs_matter::commissioner::fabric_credentials::FabricCredentials;
 use rs_matter::credentials::attestation_verifier::{AttestationInfo, AttestationVerifier};
 use rs_matter::credentials::trust_store::ArrayAttestationTrustStore;
 use rs_matter::crypto::{default_crypto, Crypto};
@@ -55,8 +56,8 @@ use rs_matter::error::Error;
 use rs_matter::im::client::commissioning::{
     ArmFailSafeResponse, AttestationResponse, BasicCommissioningInfo, CSRResponse,
     CertificateChainResponse, CertificateChainTypeEnum, CommissioningCompleteResponse,
-    CommissioningErrorEnum, RegulatoryLocationTypeEnum, SetRegulatoryConfigResponse,
-    SetTCAcknowledgementsResponse,
+    CommissioningErrorEnum, NodeOperationalCertStatusEnum, RegulatoryLocationTypeEnum,
+    SetRegulatoryConfigResponse, SetTCAcknowledgementsResponse,
 };
 use rs_matter::im::client::ImClient;
 use rs_matter::im::{AttrResp, CmdResp, IMStatusCode};
@@ -103,6 +104,18 @@ const PASE_TIMEOUT_SECS: u64 = 30;
 
 /// Timeout for IM operations in seconds
 const IM_TIMEOUT_SECS: u64 = 10;
+
+/// Test fabric ID for NOC provisioning
+const TEST_FABRIC_ID: u64 = 0x0001;
+
+/// Test CAT ID (CASE Authenticated Tag)
+const TEST_CAT_ID: u32 = 0x0001_0001;
+
+/// Test admin subject (node ID of the administrator)
+const TEST_ADMIN_SUBJECT: u64 = 0x0002;
+
+/// Test admin vendor ID
+const TEST_ADMIN_VENDOR_ID: u16 = TEST_DEV_DET.vid;
 
 static MATTER: StaticCell<Matter> = StaticCell::new();
 
@@ -463,7 +476,7 @@ async fn run_commissioning_flow<C: Crypto>(
 
     // Phase 3: Commissioning Info & Commands
     info!("=== Phase 3: Commissioning Info & Commands ===");
-    test_commissioning_commands(matter).await?;
+    test_commissioning_commands(matter, crypto).await?;
 
     // Phase 4: Interaction Model Operations
     info!("=== Phase 4: Interaction Model Operations ===");
@@ -821,7 +834,10 @@ async fn verify_device_attestation<C: Crypto>(
 // Phase 3: Commissioning Commands
 // ============================================================================
 
-async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
+async fn test_commissioning_commands<C: Crypto>(
+    matter: &Matter<'_>,
+    crypto: &C,
+) -> Result<(), Error> {
     // --- Attribute Reads (kReadCommissioningInfo) ---
 
     // Step 3a: Read BasicCommissioningInfo
@@ -972,7 +988,7 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
 
     // Step 3k: CSRRequest
     info!("Step 3k: Testing CSRRequest command...");
-    {
+    let nocsr_elements_owned = {
         let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
         let resp = run_with_timeout(test_csr_request(&mut exchange), IM_TIMEOUT_SECS).await?;
         let nocsr_elements = resp.nocsr_elements()?;
@@ -982,13 +998,17 @@ async fn test_commissioning_commands(matter: &Matter<'_>) -> Result<(), Error> {
             nocsr_elements.len(),
             attestation_signature.len()
         );
-    }
+        nocsr_elements.0.to_vec() // copy before going out of scope
+    };
 
-    // Step 3l: CommissioningComplete
-    // This should fail because we haven't completed all commissioning steps
-    // (no NOC provisioned, no CASE session). The device should return a
-    // commissioning error, not IM-level success.
-    info!("Step 3l: Testing CommissioningComplete command (expected to fail)...");
+    // Step 3m: NOC Provisioning
+    test_noc_provisioning(matter, crypto, &nocsr_elements_owned).await?;
+
+    // Step 3n: CommissioningComplete
+    // This will fail because we haven't established a CASE session yet
+    // (CASE initiator not implemented). The device requires CASE session for
+    // CommissioningComplete, so it will return a commissioning error.
+    info!("Step 3n: Testing CommissioningComplete command (expected to fail)...");
     {
         let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
         let resp =
@@ -1074,6 +1094,99 @@ async fn test_set_tc_acknowledgements<'a>(
     exchange: &'a mut Exchange<'_>,
 ) -> Result<SetTCAcknowledgementsResponse<'a>, Error> {
     ImClient::set_tc_acknowledgements(exchange, 1, 0x0001).await
+}
+
+/// Test NOC (Node Operational Certificate) provisioning.
+///
+/// 1. Parses the CSR from the CSRResponse to extract the DER-encoded CSR
+/// 2. Uses FabricCredentials to generate NOC, ICAC, and RCAC
+/// 3. Sends AddTrustedRootCertificate command with the RCAC
+/// 4. Sends AddNOC command with the generated NOC, ICAC, and IPK
+/// 5. Verifies the AddNOC response indicates success
+async fn test_noc_provisioning<C: Crypto>(
+    matter: &Matter<'_>,
+    crypto: &C,
+    nocsr_elements: &[u8],
+) -> Result<(), Error> {
+    info!("Step 3m: NOC Provisioning");
+
+    // 1. Extract and parse the CSR from the NOCSRElements
+    info!("Step 3m.1: Extracting CSR from NOCSRElements...");
+
+    let nocsr_struct = TLVElement::new(nocsr_elements);
+    let csr_element = nocsr_struct.structure()?.find_ctx(1)?;
+    let csr_der = csr_element.str()?;
+
+    info!("Extracted CSR: {} bytes", csr_der.len());
+
+    // 2. Create FabricCredentials and generate device credentials
+    info!("Step 3m.2: Generating NOC and RCAC...");
+    let mut fabric_creds = FabricCredentials::new(crypto, TEST_FABRIC_ID)?;
+    fabric_creds.enable_icac(crypto)?;
+
+    // Generate device credentials with a CAT ID
+    let cat_ids = [TEST_CAT_ID];
+    let device_creds = fabric_creds.generate_device_credentials(crypto, csr_der, &cat_ids)?;
+
+    info!(
+        "Generated credentials: NOC={} bytes, ICAC={} bytes, RCAC={} bytes, IPK={} bytes",
+        device_creds.noc.len(),
+        device_creds.icac.as_ref().map(|v| v.len()).unwrap_or(0),
+        device_creds.root_cert.len(),
+        device_creds.ipk.len()
+    );
+    info!("Assigned node_id: 0x{:016x}", device_creds.node_id);
+
+    // 3. Send AddTrustedRootCertificate
+    info!("Step 3m.3: Sending AddTrustedRootCertificate...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        run_with_timeout(
+            ImClient::add_trusted_root_certificate(&mut exchange, &device_creds.root_cert),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
+        info!("AddTrustedRootCertificate succeeded");
+    }
+
+    // 4. Send AddNOC
+    info!("Step 3m.4: Sending AddNOC...");
+    let (status, fabric_index) = {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = run_with_timeout(
+            ImClient::add_noc(
+                &mut exchange,
+                &device_creds.noc,
+                device_creds.icac.as_ref().map(|v| v.as_slice()),
+                &device_creds.ipk,
+                TEST_ADMIN_SUBJECT,
+                TEST_ADMIN_VENDOR_ID,
+            ),
+            IM_TIMEOUT_SECS,
+        )
+        .await?;
+
+        (resp.status_code()?, resp.fabric_index()?)
+    };
+
+    // 5. Verify AddNOC response
+    info!(
+        "AddNOC response: status={:?}, fabric_index={:?}",
+        status, fabric_index
+    );
+
+    if !matches!(status, NodeOperationalCertStatusEnum::OK) {
+        warn!("AddNOC failed with status: {:?}", status);
+        return Err(rs_matter::error::ErrorCode::InvalidState.into());
+    }
+
+    info!("NOC provisioning completed successfully.");
+    info!(
+        "Device is now commissioned on fabric 0x{:016x} with node_id 0x{:016x}",
+        TEST_FABRIC_ID, device_creds.node_id
+    );
+
+    Ok(())
 }
 
 // ============================================================================

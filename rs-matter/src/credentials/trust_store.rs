@@ -30,7 +30,7 @@
 use crate::cert::x509::PaaCert;
 use crate::error::{Error, ErrorCode};
 
-const SKID_LEN: usize = 20;
+pub const SKID_LEN: usize = 20;
 
 /// Maximum length of a DER-encoded PAA certificate.
 /// Matches C++ SDK `kMaxDERCertLength` (CHIPCert.h).
