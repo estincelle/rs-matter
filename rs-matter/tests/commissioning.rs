@@ -275,11 +275,18 @@ async fn run_controller_flow<C: Crypto>(matter: &Matter<'_>, crypto: &C) -> Resu
 
 async fn discover_and_resolve_device(timeout_ms: u32) -> Result<Address, Error> {
     info!("Starting mDNS discovery with discriminator: {TEST_DISCRIMINATOR}");
-    let filter = CommissionableFilter {
-        discriminator: Some(TEST_DISCRIMINATOR),
-        ..Default::default()
+
+    #[cfg(feature = "astro-dnssd")]
+    let device = discover_device::<MAX_DEVICE_ADDRESSES>(TEST_DISCRIMINATOR, timeout_ms).await?;
+
+    #[cfg(not(feature = "astro-dnssd"))]
+    let device = {
+        let filter = CommissionableFilter {
+            discriminator: Some(TEST_DISCRIMINATOR),
+            ..Default::default()
+        };
+        discover_device::<MAX_DEVICE_ADDRESSES>(&filter, timeout_ms).await?
     };
-    let device = discover_device::<MAX_DEVICE_ADDRESSES>(&filter, timeout_ms).await?;
 
     info!(
         "Discovered: {} with {} address(es), discriminator={}",
@@ -483,8 +490,16 @@ async fn test_noc_provisioning<C: Crypto>(
     matter: &Matter<'_>,
     crypto: &C,
 ) -> Result<(FabricCredentials, u64), Error> {
-    // Step 3a: Request CSR
-    info!("Step 3a: Requesting CSR from device...");
+    // Step 3a: ArmFailSafe (required before CSR/NOC commands)
+    info!("Step 3a: Arming fail-safe...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        ImClient::arm_fail_safe(&mut exchange, 60, 1).await?;
+        info!("Fail-safe armed");
+    }
+
+    // Step 3b: Request CSR
+    info!("Step 3b: Requesting CSR from device...");
     let nocsr_elements_owned = {
         let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
         let nonce = [0x43u8; 32];
