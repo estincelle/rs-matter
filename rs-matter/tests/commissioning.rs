@@ -54,7 +54,9 @@ use socket2::{Domain, Protocol, Socket, Type};
 use static_cell::StaticCell;
 
 use rs_matter::commissioner::fabric_credentials::FabricCredentials;
-use rs_matter::crypto::{test_only_crypto, Crypto};
+use rs_matter::crypto::{
+    test_only_crypto, CanonAeadKeyRef, CanonPkcSecretKey, Crypto, SecretKey, SigningSecretKey,
+};
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::clusters::level_control::LevelControlHooks;
 use rs_matter::dm::clusters::net_comm::NetworkType;
@@ -77,6 +79,7 @@ use rs_matter::im::client::commissioning::{
 use rs_matter::im::client::ImClient;
 use rs_matter::im::{AttrResp, CmdResp, IMStatusCode};
 use rs_matter::respond::DefaultResponder;
+use rs_matter::sc::case::CaseInitiator;
 use rs_matter::sc::pase::{PaseInitiator, MAX_COMM_WINDOW_TIMEOUT_SECS};
 use rs_matter::tlv::{TLVElement, TLVTag, TLVWrite};
 use rs_matter::transport::exchange::Exchange;
@@ -252,10 +255,15 @@ async fn run_controller_flow<C: Crypto>(matter: &Matter<'_>, crypto: &C) -> Resu
     establish_pase_session(matter, crypto, peer_addr, TEST_PASSCODE).await?;
 
     info!("=== Phase 3: NOC Provisioning ===");
-    test_noc_provisioning(matter, crypto).await?;
+    let (mut fabric_creds, device_node_id) = test_noc_provisioning(matter, crypto).await?;
 
-    info!("=== Phase 4: Interaction Model Operations ===");
-    test_onoff_cluster(matter).await?;
+    info!("=== Phase 3.5: CASE Session Establishment ===");
+    let case_fab_idx =
+        establish_case_session(matter, crypto, &mut fabric_creds, peer_addr, device_node_id)
+            .await?;
+
+    info!("=== Phase 4: Interaction Model Operations (over CASE session) ===");
+    test_onoff_cluster(matter, case_fab_idx.get(), device_node_id).await?;
 
     info!("=== All commissioning test phases completed successfully! ===");
     Ok(())
@@ -471,7 +479,10 @@ async fn establish_pase_session<C: Crypto>(
 /// 4. Sends AddTrustedRootCertificate command with the RCAC
 /// 5. Sends AddNOC command with the generated NOC, ICAC, and IPK
 /// 6. Verifies the AddNOC response indicates success
-async fn test_noc_provisioning<C: Crypto>(matter: &Matter<'_>, crypto: &C) -> Result<(), Error> {
+async fn test_noc_provisioning<C: Crypto>(
+    matter: &Matter<'_>,
+    crypto: &C,
+) -> Result<(FabricCredentials, u64), Error> {
     // Step 3a: Request CSR
     info!("Step 3a: Requesting CSR from device...");
     let nocsr_elements_owned = {
@@ -553,25 +564,118 @@ async fn test_noc_provisioning<C: Crypto>(matter: &Matter<'_>, crypto: &C) -> Re
         TEST_FABRIC_ID, device_creds.node_id
     );
 
-    Ok(())
+    Ok((fabric_creds, device_creds.node_id))
+}
+
+// ============================================================================
+// Phase 3.5: CASE Session Establishment
+// ============================================================================
+
+/// Establish a CASE session with the commissioned device.
+///
+/// Generates a controller NOC from the same fabric credentials used to
+/// commission the device, adds the controller's fabric to the local FabricMgr,
+/// and performs a CASE handshake.
+async fn establish_case_session<C: Crypto>(
+    matter: &Matter<'_>,
+    crypto: &C,
+    fabric_creds: &mut FabricCredentials,
+    peer_addr: Address,
+    device_node_id: u64,
+) -> Result<core::num::NonZeroU8, Error> {
+    // 1. Generate controller keypair
+    let controller_secret_key = crypto.generate_secret_key()?;
+
+    // 2. Generate CSR from controller's key
+    let mut csr_buf = [0u8; 256];
+    let csr_der = controller_secret_key.csr(&mut csr_buf)?;
+
+    // 3. Issue a controller NOC using the same fabric credentials
+    let controller_node_id = TEST_ADMIN_SUBJECT;
+    let controller_creds = fabric_creds.generate_device_credentials_with_node_id(
+        crypto,
+        csr_der,
+        controller_node_id,
+        &[],
+    )?;
+
+    // 4. Get canonical secret key bytes for FabricMgr::add
+    let mut secret_key_canon = CanonPkcSecretKey::new();
+    controller_secret_key.write_canon(&mut secret_key_canon)?;
+
+    // 5. Add controller fabric to local FabricMgr
+    let fab_idx = {
+        let mut fabric_mgr = matter.fabric_mgr.borrow_mut();
+        let fabric = fabric_mgr.add(
+            crypto,
+            secret_key_canon.reference(),
+            &controller_creds.root_cert,
+            &controller_creds.noc,
+            controller_creds
+                .icac
+                .as_ref()
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]),
+            Some(CanonAeadKeyRef::new(&controller_creds.ipk)),
+            TEST_ADMIN_VENDOR_ID,
+            controller_node_id,
+            &mut || {},
+        )?;
+        fabric.fab_idx()
+    };
+
+    // 6. Initiate CASE handshake
+    info!(
+        "Initiating CASE handshake with device node 0x{:016x}...",
+        device_node_id
+    );
+
+    let mut exchange = Exchange::initiate_unsecured(matter, crypto, peer_addr).await?;
+
+    let mut case_fut = pin!(CaseInitiator::initiate(
+        &mut exchange,
+        crypto,
+        fab_idx,
+        device_node_id
+    ));
+    let mut timeout = pin!(Timer::after(Duration::from_secs(PASE_TIMEOUT_SECS)));
+
+    match select(&mut case_fut, &mut timeout).await {
+        Either::First(Ok(())) => {
+            info!("CASE session established successfully!");
+            Ok(fab_idx)
+        }
+        Either::First(Err(e)) => {
+            warn!("CASE handshake failed: {e:?}");
+            Err(e)
+        }
+        Either::Second(_) => {
+            warn!("CASE handshake timed out");
+            Err(rs_matter::error::ErrorCode::RxTimeout.into())
+        }
+    }
 }
 
 // ============================================================================
 // Phase 4: Interaction Model Operations
 // ============================================================================
 
-async fn test_onoff_cluster(matter: &Matter<'_>) -> Result<(), Error> {
-    info!("Step 3a: Reading initial OnOff attribute...");
-    let initial_value = read_onoff_with_timeout(matter).await?;
+async fn test_onoff_cluster(
+    matter: &Matter<'_>,
+    fab_idx: u8,
+    peer_node_id: u64,
+) -> Result<(), Error> {
+    info!("Step 4a: Reading initial OnOff attribute...");
+    let initial_value = read_onoff_with_timeout(matter, fab_idx, peer_node_id).await?;
     info!("Initial OnOff value: {initial_value}");
     assert!(!initial_value, "Expected initial OnOff value to be false");
 
-    info!("Step 3b: Invoking Toggle command...");
-    let status = invoke_toggle_with_timeout(matter).await?;
+    info!("Step 4b: Invoking Toggle command...");
+    let status = invoke_toggle_with_timeout(matter, fab_idx, peer_node_id).await?;
     info!("Toggle completed with status: {status:?}");
 
-    info!("Step 3c: Verifying toggle effect...");
-    let final_value = read_onoff_with_timeout(matter).await?;
+    info!("Step 4c: Verifying toggle effect...");
+    let final_value = read_onoff_with_timeout(matter, fab_idx, peer_node_id).await?;
     info!("Final OnOff value: {final_value}");
 
     assert!(
@@ -583,8 +687,12 @@ async fn test_onoff_cluster(matter: &Matter<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-async fn read_onoff_with_timeout(matter: &Matter<'_>) -> Result<bool, Error> {
-    let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+async fn read_onoff_with_timeout(
+    matter: &Matter<'_>,
+    fab_idx: u8,
+    peer_node_id: u64,
+) -> Result<bool, Error> {
+    let mut exchange = Exchange::initiate(matter, fab_idx, peer_node_id, true).await?;
     debug!("IM read exchange initiated: {}", exchange.id());
 
     let mut read_fut = pin!(read_onoff(&mut exchange));
@@ -611,8 +719,12 @@ async fn read_onoff(exchange: &mut Exchange<'_>) -> Result<bool, Error> {
     }
 }
 
-async fn invoke_toggle_with_timeout(matter: &Matter<'_>) -> Result<IMStatusCode, Error> {
-    let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+async fn invoke_toggle_with_timeout(
+    matter: &Matter<'_>,
+    fab_idx: u8,
+    peer_node_id: u64,
+) -> Result<IMStatusCode, Error> {
+    let mut exchange = Exchange::initiate(matter, fab_idx, peer_node_id, true).await?;
     debug!("Invoke exchange initiated: {}", exchange.id());
 
     let mut invoke_fut = pin!(invoke_toggle(&mut exchange));
