@@ -19,7 +19,7 @@
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
 
-use crate::error::Error;
+use crate::{credentials::trust_store::KeyId, error::Error};
 
 pub use rand_core::{CryptoRng, CryptoRngCore, RngCore};
 
@@ -214,6 +214,12 @@ pub trait Crypto {
 
     /// Get the EC Generator point.
     fn ec_generator_point(&self) -> Result<Self::EcPoint<'_>, Error>;
+
+    /// Compute a key identifier (KeyID) from a public key.
+    ///
+    /// Per RFC 5280 section 4.2.1.2 and the Matter specification,
+    /// the key identifier is the 160-bit SHA-1 hash of the public key.
+    fn compute_key_id(&self, pubkey: &[u8]) -> Result<KeyId, Error>;
 }
 
 impl<T> Crypto for &T
@@ -345,6 +351,10 @@ where
 
     fn ec_generator_point(&self) -> Result<Self::EcPoint<'_>, Error> {
         (*self).ec_generator_point()
+    }
+
+    fn compute_key_id(&self, pubkey: &[u8]) -> Result<KeyId, Error> {
+        (*self).compute_key_id(pubkey)
     }
 }
 

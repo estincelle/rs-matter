@@ -53,6 +53,7 @@ use rand_core::RngCore;
 use socket2::{Domain, Protocol, Socket, Type};
 use static_cell::StaticCell;
 
+use rs_matter::commissioner::fabric_credentials::FabricCredentials;
 use rs_matter::crypto::{test_only_crypto, Crypto};
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::clusters::level_control::LevelControlHooks;
@@ -70,6 +71,9 @@ use rs_matter::dm::{
     Node,
 };
 use rs_matter::error::Error;
+use rs_matter::im::client::commissioning::{
+    CSRResponse, NOCResponse, NodeOperationalCertStatusEnum,
+};
 use rs_matter::im::client::ImClient;
 use rs_matter::im::{AttrResp, CmdResp, IMStatusCode};
 use rs_matter::respond::DefaultResponder;
@@ -99,6 +103,10 @@ const CMD_TOGGLE: u32 = 0x0002;
 const PASE_TIMEOUT_SECS: u64 = 30;
 const IM_TIMEOUT_SECS: u64 = 10;
 const DISCOVERY_TIMEOUT_MS: u32 = 30_000;
+const TEST_FABRIC_ID: u64 = 0x0001;
+const TEST_CAT_ID: u32 = 0x0001_0001;
+const TEST_ADMIN_SUBJECT: u64 = 0x0002;
+const TEST_ADMIN_VENDOR_ID: u16 = TEST_DEV_DET.vid;
 const MAX_DEVICE_ADDRESSES: usize = 4;
 #[cfg(not(feature = "astro-dnssd"))]
 const MAX_DISCOVERED_DEVICES: usize = 8;
@@ -243,7 +251,10 @@ async fn run_controller_flow<C: Crypto>(matter: &Matter<'_>, crypto: &C) -> Resu
     info!("=== Phase 2: PASE Session Establishment ===");
     establish_pase_session(matter, crypto, peer_addr, TEST_PASSCODE).await?;
 
-    info!("=== Phase 3: Interaction Model Operations ===");
+    info!("=== Phase 3: NOC Provisioning ===");
+    test_noc_provisioning(matter, crypto).await?;
+
+    info!("=== Phase 4: Interaction Model Operations ===");
     test_onoff_cluster(matter).await?;
 
     info!("=== All commissioning test phases completed successfully! ===");
@@ -449,7 +460,104 @@ async fn establish_pase_session<C: Crypto>(
 }
 
 // ============================================================================
-// Phase 3: Interaction Model Operations
+// Phase 3: NOC Provisioning
+// ============================================================================
+
+/// Test NOC (Node Operational Certificate) provisioning.
+///
+/// 1. Requests a CSR from the device
+/// 2. Parses the CSR from the NOCSRElements to extract the DER-encoded CSR
+/// 3. Uses FabricCredentials to generate NOC, ICAC, and RCAC
+/// 4. Sends AddTrustedRootCertificate command with the RCAC
+/// 5. Sends AddNOC command with the generated NOC, ICAC, and IPK
+/// 6. Verifies the AddNOC response indicates success
+async fn test_noc_provisioning<C: Crypto>(matter: &Matter<'_>, crypto: &C) -> Result<(), Error> {
+    // Step 3a: Request CSR
+    info!("Step 3a: Requesting CSR from device...");
+    let nocsr_elements_owned = {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let nonce = [0x43u8; 32];
+        let resp = ImClient::csr_request(&mut exchange, &nonce, false).await?;
+        let nocsr_elements = resp.nocsr_elements()?;
+        let attestation_signature = resp.attestation_signature()?;
+        info!(
+            "CSR response: nocsr_elements_len={}, signature_len={}",
+            nocsr_elements.len(),
+            attestation_signature.len()
+        );
+        nocsr_elements.0.to_vec()
+    };
+
+    // Step 3b: Extract and parse the CSR from the NOCSRElements
+    info!("Step 3b: Extracting CSR from NOCSRElements...");
+    let nocsr_struct = TLVElement::new(&nocsr_elements_owned);
+    let csr_element = nocsr_struct.structure()?.find_ctx(1)?;
+    let csr_der = csr_element.str()?;
+    info!("Extracted CSR: {} bytes", csr_der.len());
+
+    // Step 3c: Create FabricCredentials and generate device credentials
+    info!("Step 3c: Generating NOC and RCAC...");
+    let mut fabric_creds = FabricCredentials::new(crypto, TEST_FABRIC_ID)?;
+    fabric_creds.enable_icac(crypto)?;
+
+    let cat_ids = [TEST_CAT_ID];
+    let device_creds = fabric_creds.generate_device_credentials(crypto, csr_der, &cat_ids)?;
+
+    info!(
+        "Generated credentials: NOC={} bytes, ICAC={} bytes, RCAC={} bytes, IPK={} bytes",
+        device_creds.noc.len(),
+        device_creds.icac.as_ref().map(|v| v.len()).unwrap_or(0),
+        device_creds.root_cert.len(),
+        device_creds.ipk.len()
+    );
+    info!("Assigned node_id: 0x{:016x}", device_creds.node_id);
+
+    // Step 3d: Send AddTrustedRootCertificate
+    info!("Step 3d: Sending AddTrustedRootCertificate...");
+    {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        ImClient::add_trusted_root_certificate(&mut exchange, &device_creds.root_cert).await?;
+        info!("AddTrustedRootCertificate succeeded");
+    }
+
+    // Step 3e: Send AddNOC
+    info!("Step 3e: Sending AddNOC...");
+    let (status, fabric_index) = {
+        let mut exchange = Exchange::initiate(matter, 0, 0, true).await?;
+        let resp = ImClient::add_noc(
+            &mut exchange,
+            &device_creds.noc,
+            device_creds.icac.as_ref().map(|v| v.as_slice()),
+            &device_creds.ipk,
+            TEST_ADMIN_SUBJECT,
+            TEST_ADMIN_VENDOR_ID,
+        )
+        .await?;
+
+        (resp.status_code()?, resp.fabric_index()?)
+    };
+
+    info!(
+        "AddNOC response: status={:?}, fabric_index={:?}",
+        status, fabric_index
+    );
+
+    if !matches!(status, NodeOperationalCertStatusEnum::OK) {
+        warn!("AddNOC failed with status: {:?}", status);
+        return Err(rs_matter::error::ErrorCode::InvalidState.into());
+    }
+
+    info!("NOC provisioning completed successfully.");
+    info!(
+        "Device is now commissioned on fabric 0x{:016x} with node_id 0x{:016x}",
+        TEST_FABRIC_ID, device_creds.node_id
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Phase 4: Interaction Model Operations
 // ============================================================================
 
 async fn test_onoff_cluster(matter: &Matter<'_>) -> Result<(), Error> {

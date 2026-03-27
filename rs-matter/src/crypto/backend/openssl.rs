@@ -47,7 +47,9 @@ use hmac::{Hmac, Mac};
 
 use rand_core::{CryptoRng, RngCore};
 
-use crate::crypto::{CanonPkcSecretKeyRef, CanonUint320Ref, CryptoSensitive, CryptoSensitiveRef};
+use crate::crypto::{
+    CanonPkcSecretKeyRef, CanonUint320Ref, CryptoSensitive, CryptoSensitiveRef, KeyId,
+};
 use crate::error::{Error, ErrorCode};
 
 macro_rules! openssl_check {
@@ -285,6 +287,13 @@ impl crate::crypto::Crypto for OpenSslCrypto<'_> {
             group: &self.ec_group,
             point,
         })
+    }
+
+    fn compute_key_id(&self, pubkey: &[u8]) -> Result<KeyId, Error> {
+        let digest = openssl_check!(openssl::hash::hash(MessageDigest::sha1(), pubkey))?;
+        let mut key_id: KeyId = [0; 20];
+        key_id.copy_from_slice(digest.as_ref());
+        Ok(key_id)
     }
 }
 
